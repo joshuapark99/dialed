@@ -18,6 +18,14 @@ Desktop.ini
 *.log
 tmp/
 temp/
+.turbo/
+.pnpm-store/
+
+# Framework and test output
+.next/
+*.tsbuildinfo
+playwright-report/
+test-results/
 
 # Common build and dependency output
 dist/

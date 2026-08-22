@@ -1,0 +1,29 @@
+{
+  "name": "dialed",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.15.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "db:generate": "pnpm --filter @dialed/db db:generate",
+    "db:migrate": "pnpm --filter @dialed/db db:migrate",
+    "dev": "turbo run dev --parallel",
+    "dev:api": "pnpm --filter @dialed/api dev",
+    "dev:web": "pnpm --filter @dialed/web dev",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "test:e2e": "playwright test",
+    "typecheck": "turbo run typecheck"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "prettier": "^3.6.2",
+    "turbo": "^2.5.6",
+    "typescript": "^5.9.2"
+  }
+}
