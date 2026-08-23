@@ -288,6 +288,37 @@ describe("owner-inclusive primary keys", () => {
 });
 
 describe("coffee and bag persistence", () => {
+  it("returns a Coffee operation before its paired bag when the clock is fixed", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-22T12:00:00.000Z"));
+    let randomCall = 0;
+    vi.spyOn(globalThis.crypto, "getRandomValues").mockImplementation(
+      <T extends ArrayBufferView | null>(array: T): T => {
+        if (array) {
+          new Uint8Array(array.buffer, array.byteOffset, array.byteLength).fill(
+            randomCall++ === 0 ? 0xff : 0,
+          );
+        }
+        return array;
+      },
+    );
+    const coffeeRecord = coffee(
+      "0198d3a4-1111-7000-8000-000000000089",
+      "Ordered coffee",
+    );
+
+    await saveCoffeeWithBag(
+      alice,
+      coffeeRecord,
+      coffeeBag(coffeeRecord.id, coffeeRecord.id),
+    );
+
+    expect((await getOperations(alice)).map(({ entity }) => entity)).toEqual([
+      "coffee",
+      "bean",
+    ]);
+  });
+
   it("migrates version-5 beans into paired Coffees and bags without changing brew references", async () => {
     db.close();
     await Dexie.delete("dialed-local");
@@ -493,6 +524,7 @@ describe("atomic remote pages", () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   db.close();
   await Dexie.delete("dialed-local");

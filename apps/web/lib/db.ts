@@ -436,6 +436,7 @@ function operation(
   entity: SyncEntity,
   entityId: string,
   payload: Record<string, unknown>,
+  createdAt = new Date().toISOString(),
 ): Owned<SyncOperation> {
   return {
     ownerId,
@@ -444,7 +445,7 @@ function operation(
     entityId,
     action: "upsert",
     payload,
-    createdAt: new Date().toISOString(),
+    createdAt,
   };
 }
 
@@ -488,10 +489,25 @@ export async function saveCoffeeWithBag(
       await assertOwnerWritable(ownerId);
       await db.coffees.put({ ...coffee, ownerId });
       await db.bags.put({ ...bag, ownerId });
+      const coffeeOperationAt = Date.now();
       await db.operations.add(
-        operation(ownerId, "coffee", coffee.id, { ...coffee }),
+        operation(
+          ownerId,
+          "coffee",
+          coffee.id,
+          { ...coffee },
+          new Date(coffeeOperationAt).toISOString(),
+        ),
       );
-      await db.operations.add(operation(ownerId, "bean", bag.id, { ...bag }));
+      await db.operations.add(
+        operation(
+          ownerId,
+          "bean",
+          bag.id,
+          { ...bag },
+          new Date(coffeeOperationAt + 1).toISOString(),
+        ),
+      );
     },
   );
 }
