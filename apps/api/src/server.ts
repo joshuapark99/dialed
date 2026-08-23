@@ -5,6 +5,7 @@ import Fastify, {
 } from "fastify";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
+import { fromNodeHeaders } from "better-auth/node";
 import type { SyncStore, StoredSyncOperation } from "@dialed/db";
 import type { AuthService, Principal } from "./auth.js";
 import {
@@ -131,8 +132,17 @@ export function createServer(
 
   if (dependencies.auth.handler) {
     app.all("/api/auth/*", async (request, reply) => {
-      reply.hijack();
-      await dependencies.auth.handler!(request.raw, reply.raw);
+      const url = new URL(request.url, `http://${request.headers.host}`);
+      const authRequest = new Request(url, {
+        method: request.method,
+        headers: fromNodeHeaders(request.headers),
+        ...(request.body ? { body: JSON.stringify(request.body) } : {}),
+      });
+      const response = await dependencies.auth.handler!(authRequest);
+
+      reply.status(response.status);
+      response.headers.forEach((value, key) => reply.header(key, value));
+      return reply.send(response.body ? await response.text() : null);
     });
   }
 

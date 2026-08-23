@@ -3,7 +3,7 @@ import type { DialedDatabase } from "@dialed/db";
 import * as dbSchema from "@dialed/db/schema";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { fromNodeHeaders, toNodeHandler } from "better-auth/node";
+import { fromNodeHeaders } from "better-auth/node";
 
 export interface Principal {
   id: string;
@@ -14,7 +14,7 @@ export interface Principal {
 
 export interface AuthService {
   authenticate(request: FastifyRequest): Promise<Principal | null>;
-  handler?: ReturnType<typeof toNodeHandler>;
+  handler?: (request: Request) => Promise<Response>;
 }
 
 export interface BetterAuthOptions {
@@ -50,7 +50,7 @@ export function createBetterAuthService(
   });
 
   return {
-    handler: toNodeHandler(auth),
+    handler: auth.handler,
     async authenticate(request) {
       const session = await auth.api.getSession({
         headers: fromNodeHeaders(request.headers),

@@ -89,6 +89,46 @@ test("health and readiness expose different concerns", async () => {
   await app.close();
 });
 
+test("auth endpoints forward parsed JSON bodies to the auth handler", async () => {
+  let receivedBody: unknown;
+  const auth: AuthService = {
+    async authenticate() {
+      return null;
+    },
+    handler: async (request) => {
+      receivedBody = await request.json();
+      return Response.json({
+        url: "https://accounts.google.com/o/oauth2/v2/auth",
+        redirect: true,
+      });
+    },
+  };
+  const app = createServer({ auth, store: new MemoryStore() });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/auth/sign-in/social",
+    headers: {
+      origin: "http://localhost:3000",
+    },
+    payload: {
+      provider: "google",
+      callbackURL: "http://localhost:3000",
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(receivedBody, {
+    provider: "google",
+    callbackURL: "http://localhost:3000",
+  });
+  assert.deepEqual(response.json(), {
+    url: "https://accounts.google.com/o/oauth2/v2/auth",
+    redirect: true,
+  });
+  await app.close();
+});
+
 test("protected endpoints require authentication", async () => {
   const app = createServer({ auth: signedOut, store: new MemoryStore() });
   const response = await app.inject({ method: "GET", url: "/v1/me" });
