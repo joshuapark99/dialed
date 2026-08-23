@@ -42,7 +42,7 @@ export const BeanSchema = z
 
 export const CoffeeSchema = z
   .object({
-    ...entityFields,
+    id: EntityIdSchema,
     name: z.string().trim().min(1).max(120),
     roaster: z.string().trim().min(1).max(120),
     originCountry: z.string().trim().min(1).max(120).optional(),
@@ -53,18 +53,20 @@ export const CoffeeSchema = z
     elevationMeters: z.number().finite().int().min(1).max(9000).optional(),
     roastLevel: RoastLevelSchema.default("unknown"),
     notes: optionalText,
+    createdAt: TimestampSchema,
   })
   .strict();
 
 export const CoffeeBagSchema = z
   .object({
-    ...entityFields,
+    id: EntityIdSchema,
     coffeeId: EntityIdSchema,
     roastedOn: z.string().date().optional(),
     purchasedOn: z.string().date().optional(),
     openedOn: z.string().date().optional(),
     startingWeightGrams: positiveMeasurement.max(100_000).optional(),
     notes: optionalText,
+    createdAt: TimestampSchema,
   })
   .strict();
 

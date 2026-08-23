@@ -29,7 +29,6 @@ const timestamp = "2026-08-22T12:00:00.000Z";
 
 const validCoffee = {
   id: ids.bean,
-  userId: null,
   name: "Hualalai Kona",
   roaster: "Coffee Purveyors",
   originCountry: "United States",
@@ -41,21 +40,16 @@ const validCoffee = {
   roastLevel: "medium-light",
   notes: "Seasonal release",
   createdAt: timestamp,
-  updatedAt: timestamp,
-  deletedAt: null,
 };
 
 const validBag = {
   id: ids.bag,
-  userId: null,
   coffeeId: ids.bean,
   roastedOn: "2026-08-12",
   purchasedOn: "2026-08-14",
   openedOn: "2026-08-18",
   startingWeightGrams: 340,
   createdAt: timestamp,
-  updatedAt: timestamp,
-  deletedAt: null,
 };
 
 const machine = MachineProfileSchema.parse({
@@ -144,6 +138,25 @@ describe("schemas", () => {
       coffeeId: ids.bean,
       startingWeightGrams: 340,
     });
+  });
+
+  it("accepts the minimum local coffee and bag contracts", () => {
+    expect(
+      CoffeeSchema.parse({
+        id: ids.bean,
+        name: "Hualalai Kona",
+        roaster: "Coffee Purveyors",
+        createdAt: timestamp,
+      }),
+    ).toMatchObject({ name: "Hualalai Kona", roastLevel: "unknown" });
+
+    expect(
+      CoffeeBagSchema.parse({
+        id: ids.bag,
+        coffeeId: ids.bean,
+        createdAt: timestamp,
+      }),
+    ).toMatchObject({ coffeeId: ids.bean });
   });
 
   it.each([0, -1, 9001])("rejects invalid coffee elevation %s", (value) => {

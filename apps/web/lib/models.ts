@@ -1,4 +1,9 @@
 export type RoastLevel = "light" | "medium" | "dark";
+export type CoffeeRoastLevel =
+  | RoastLevel
+  | "medium-light"
+  | "medium-dark"
+  | "unknown";
 export type TemperatureControl = "none" | "relative" | "precise";
 
 export const ANONYMOUS_OWNER_ID = "anonymous";
@@ -24,7 +29,7 @@ export interface Coffee {
   process?: string;
   varietal?: string;
   elevationMeters?: number;
-  roastLevel: RoastLevel | "unknown";
+  roastLevel: CoffeeRoastLevel;
   notes?: string;
   createdAt: string;
 }
