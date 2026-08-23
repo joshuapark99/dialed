@@ -47,6 +47,68 @@ test("onboards, logs a shot, and returns one next move on mobile", async ({
   });
 });
 
+test("requires confirmation before deleting a brew log", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  await completeOnboarding(page);
+  await page.getByRole("button", { name: "Log", exact: true }).click();
+  await page.getByRole("textbox", { name: "Grind", exact: true }).fill("0.8");
+  await page.getByRole("button", { name: "Save and see next move" }).click();
+  await page.getByRole("button", { name: "History" }).click();
+  await page.getByRole("button", { name: /Hualalai Kona/ }).click();
+
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.getByRole("button", { name: "Delete log" }).click();
+  await expect(
+    page.getByRole("dialog", { name: "Shot details" }),
+  ).toBeVisible();
+  await expect(page.getByText("1 shot", { exact: true })).toBeVisible();
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Delete log" }).click();
+  await expect(
+    page.getByRole("heading", { name: "No shots yet" }),
+  ).toBeVisible();
+});
+
+test("keeps the brew log and reports a deletion failure", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  await completeOnboarding(page);
+  await page.getByRole("button", { name: "Log", exact: true }).click();
+  await page.getByRole("textbox", { name: "Grind", exact: true }).fill("0.8");
+  await page.getByRole("button", { name: "Save and see next move" }).click();
+  await page.getByRole("button", { name: "History" }).click();
+  await page.getByRole("button", { name: /Hualalai Kona/ }).click();
+  await page.evaluate(() => {
+    const originalAdd = IDBObjectStore.prototype.add;
+    IDBObjectStore.prototype.add = function (
+      value: unknown,
+      key?: IDBValidKey,
+    ): IDBRequest<IDBValidKey> {
+      if (this.name === "ownedOperations") {
+        throw new DOMException("Storage full", "QuotaExceededError");
+      }
+      return key === undefined
+        ? originalAdd.call(this, value)
+        : originalAdd.call(this, value, key);
+    };
+  });
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Delete log" }).click();
+
+  await expect(
+    page.getByRole("alert").filter({
+      hasText: "Couldn't delete this log. Your brew is still saved. Try again.",
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("dialog", { name: "Shot details" }),
+  ).toBeVisible();
+  await expect(page.getByText("1 shot", { exact: true })).toBeVisible();
+});
+
 test("onboarding and the empty dashboard fit a desktop viewport", async ({
   page,
 }, testInfo) => {

@@ -333,7 +333,7 @@ function parsePullPage(
 async function runSynchronization(
   ownerId: string,
   dependencies: SyncDependencies,
-): Promise<void> {
+): Promise<ReadonlySet<string>> {
   if (!dependencies.isOnline()) {
     throw new Error("Synchronization requires a network connection");
   }
@@ -404,6 +404,7 @@ async function runSynchronization(
   if (pending.length) {
     await dependencies.acknowledgeOperations(ownerId, pushedOperationIds);
   }
+  return new Set(pushedOperationIds);
 }
 
 export interface SyncCoordinator {
@@ -432,7 +433,18 @@ export function createSyncCoordinator(
     if (existing) return existing;
     let request!: Promise<void>;
     request = ownerLock
-      .runExclusive(ownerId, () => runSynchronization(ownerId, dependencies))
+      .runExclusive(ownerId, async () => {
+        while (true) {
+          const pushedOperationIds = await runSynchronization(
+            ownerId,
+            dependencies,
+          );
+          if (resets.has(ownerId) || deletions.has(ownerId)) return;
+          const [next] = await dependencies.getOperations(ownerId, 1);
+          if (resets.has(ownerId) || deletions.has(ownerId)) return;
+          if (!next || pushedOperationIds.has(next.operationId)) return;
+        }
+      })
       .finally(() => {
         if (inFlight.get(ownerId) === request) inFlight.delete(ownerId);
       });

@@ -195,7 +195,7 @@ describe("owner-aware synchronization", () => {
     }
   });
 
-  it("returns the same promise and request sequence to concurrent same-owner callers", async () => {
+  it("coalesces concurrent same-owner callers into one request sequence", async () => {
     let releaseMe!: () => void;
     const meBlocked = new Promise<void>((resolve) => {
       releaseMe = resolve;
@@ -213,14 +213,80 @@ describe("owner-aware synchronization", () => {
     const first = sync(alice);
     const second = sync(alice);
 
-    expect(second).toBe(first);
     releaseMe();
-    await first;
+    await Promise.all([first, second]);
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(fetch.mock.calls.map(([input]) => String(input))).toEqual([
       "/api/v1/me",
       "/api/v1/sync/pull?cursor=0",
     ]);
+  });
+
+  it("drains a tombstone that replaces the snapshotted upsert during sync", async () => {
+    let releasePull!: () => void;
+    let markPullStarted!: () => void;
+    const pullBlocked = new Promise<void>((resolve) => {
+      releasePull = resolve;
+    });
+    const pullStarted = new Promise<void>((resolve) => {
+      markPullStarted = resolve;
+    });
+    const initial = queuedOperation(alice, "brew");
+    const tombstoneOperationId = `${operationId.slice(0, -1)}2`;
+    const tombstone: Owned<SyncOperation> = {
+      ownerId: alice,
+      operationId: tombstoneOperationId,
+      entity: "brew",
+      entityId: brewId,
+      action: "delete",
+      createdAt,
+    };
+    let pending: Array<Owned<SyncOperation>> = [initial];
+    let pullCount = 0;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "/api/v1/me") return response(200, { user: aliceAccount });
+      if (url === "/api/v1/sync/push") return response(200, { results: [] });
+      pullCount += 1;
+      if (pullCount === 1) {
+        markPullStarted();
+        await pullBlocked;
+      }
+      return response(200, { operations: [], cursor: 0, hasMore: false });
+    });
+    const getOperations = vi.fn(async (_ownerId: string, limit?: number) =>
+      limit === undefined ? pending : pending.slice(0, limit),
+    );
+    const acknowledgeOperations = vi.fn(
+      async (_ownerId: string, operationIds: string[]) => {
+        pending = pending.filter(
+          (operation) => !operationIds.includes(operation.operationId),
+        );
+      },
+    );
+    const coordinator = createSyncCoordinator(
+      dependencies({ fetch, getOperations, acknowledgeOperations }),
+    );
+
+    const sync = coordinator.synchronize(alice);
+    await pullStarted;
+    pending = [tombstone];
+    releasePull();
+    await sync;
+
+    expect(fetch.mock.calls.map(([input]) => String(input))).toEqual([
+      "/api/v1/me",
+      "/api/v1/sync/push",
+      "/api/v1/sync/pull?cursor=0",
+      "/api/v1/me",
+      "/api/v1/sync/push",
+      "/api/v1/sync/pull?cursor=0",
+    ]);
+    expect(acknowledgeOperations.mock.calls).toEqual([
+      [alice, [operationId]],
+      [alice, [tombstoneOperationId]],
+    ]);
+    expect(pending).toEqual([]);
   });
 
   it("waits for an in-flight sync before clearing and starts a fresh pull at cursor zero", async () => {
@@ -373,6 +439,72 @@ describe("owner-aware synchronization", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("does not start another sync when account deletion is queued during the queue probe", async () => {
+    let releaseProbe!: () => void;
+    let markProbeStarted!: () => void;
+    const probeBlocked = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    const probeStarted = new Promise<void>((resolve) => {
+      markProbeStarted = resolve;
+    });
+    let fullReads = 0;
+    let probeReads = 0;
+    const getOperations = vi.fn(async (_ownerId: string, limit?: number) => {
+      if (limit === 100) {
+        fullReads += 1;
+        return fullReads === 1 ? [queuedOperation()] : [];
+      }
+      probeReads += 1;
+      if (probeReads === 1) {
+        markProbeStarted();
+        await probeBlocked;
+        return [
+          {
+            ...queuedOperation(alice, "brew"),
+            operationId: `${operationId.slice(0, -1)}2`,
+            action: "delete" as const,
+            payload: undefined,
+          },
+        ];
+      }
+      return [];
+    });
+    const fetch = vi.fn(async (input: string | URL | Request) =>
+      String(input) === "/api/v1/me"
+        ? response(200, { user: aliceAccount })
+        : String(input) === "/api/v1/sync/push"
+          ? response(200, { results: [] })
+          : response(200, { operations: [], cursor: 0, hasMore: false }),
+    );
+    const events: string[] = [];
+    const coordinator = createSyncCoordinator(
+      dependencies({ fetch, getOperations }),
+      fakeOwnerLock(),
+    );
+
+    const sync = coordinator.synchronize(alice);
+    await probeStarted;
+    const deletion = coordinator.deleteAccount(
+      alice,
+      async () => {
+        events.push("cloud-deleted");
+      },
+      async () => {
+        events.push("local-cleared");
+      },
+    );
+    releaseProbe();
+    await Promise.all([sync, deletion]);
+
+    expect(fetch.mock.calls.map(([input]) => String(input))).toEqual([
+      "/api/v1/me",
+      "/api/v1/sync/push",
+      "/api/v1/sync/pull?cursor=0",
+    ]);
+    expect(events).toEqual(["cloud-deleted", "local-cleared"]);
+  });
+
   it("does not clear local account data when cloud deletion detects an account mismatch", async () => {
     const clearLocal = vi.fn(async () => undefined);
     const coordinator = createSyncCoordinator(dependencies(), fakeOwnerLock());
@@ -472,11 +604,11 @@ describe("owner-aware synchronization", () => {
         return response(200, { operations: [], cursor: 0, hasMore: false });
       },
     );
-    const getOperations = vi.fn(async (ownerId: string, limit?: number) => {
-      expect(ownerId).toBe(alice);
-      expect(limit).toBe(100);
-      return [aliceBrew, bobBean].filter((item) => item.ownerId === ownerId);
-    });
+    const getOperations = vi.fn(async (ownerId: string, limit?: number) =>
+      [aliceBrew, bobBean]
+        .filter((item) => item.ownerId === ownerId)
+        .slice(0, limit),
+    );
     const acknowledgeOperations = vi.fn(async () => undefined);
     const sync = createSynchronizer(
       dependencies({ fetch, getOperations, acknowledgeOperations }),
@@ -484,12 +616,13 @@ describe("owner-aware synchronization", () => {
 
     await sync(alice);
 
+    expect(getOperations.mock.calls[0]).toEqual([alice, 100]);
     expect(acknowledgeOperations).toHaveBeenCalledWith(alice, [
       aliceBrew.operationId,
     ]);
   });
 
-  it("preserves a newer local brew operation created after the push snapshot", async () => {
+  it("uploads a newer local brew operation created after the push snapshot", async () => {
     db.close();
     await Dexie.delete("dialed-local");
     await db.open();
@@ -497,14 +630,28 @@ describe("owner-aware synchronization", () => {
       const initial = brewPayload(36);
       await saveBrew(alice, initial);
       const pushed = (await getStoredOperations(alice))[0]!;
+      let pushCount = 0;
       const fetch = vi.fn(
         async (input: string | URL | Request): Promise<Response> => {
           const url = String(input);
           if (url === "/api/v1/me")
             return response(200, { user: aliceAccount });
           if (url === "/api/v1/sync/push") {
-            await saveBrew(alice, brewPayload(42, "2026-08-22T12:01:00.000Z"));
+            pushCount += 1;
+            if (pushCount === 1) {
+              await saveBrew(
+                alice,
+                brewPayload(42, "2026-08-22T12:01:00.000Z"),
+              );
+            }
             return response(200, { results: [] });
+          }
+          if (url === "/api/v1/sync/pull?cursor=1") {
+            return response(200, {
+              operations: [],
+              cursor: 1,
+              hasMore: false,
+            });
           }
           return response(200, {
             operations: [
@@ -536,11 +683,10 @@ describe("owner-aware synchronization", () => {
 
       expect((await getBrews(alice))[0]).toMatchObject({
         yield: 42,
-        syncState: "pending",
+        syncState: "synced",
       });
-      const remaining = await getStoredOperations(alice);
-      expect(remaining).toHaveLength(1);
-      expect(remaining[0]?.operationId).not.toBe(pushed.operationId);
+      expect(await getStoredOperations(alice)).toEqual([]);
+      expect(pushCount).toBe(2);
     } finally {
       db.close();
       await Dexie.delete("dialed-local");

@@ -10,6 +10,7 @@ import {
   clearDeletedAccountData,
   clearOwnerData,
   db,
+  deleteBrew,
   DeletedOwnerWriteError,
   discardAnonymousData,
   getBeans,
@@ -398,6 +399,33 @@ describe("owner-scoped persistence", () => {
     expect(operations).toHaveLength(1);
     expect(operations[0]).toMatchObject({ ownerId: alice, entity: "brew" });
     expect(await getOperations(bob)).toEqual([]);
+  });
+
+  it("deletes only the requested owner's brew and queues a tombstone", async () => {
+    const sharedId = "0198d3a4-1111-7000-8000-000000000021";
+    await saveBrew(alice, brew(sharedId, sharedId));
+    await saveBrew(bob, { ...brew(sharedId, sharedId), yield: 40 });
+
+    expect(await deleteBrew(alice, sharedId)).toBe(true);
+
+    expect(await getBrews(alice)).toEqual([]);
+    expect((await getBrews(bob))[0]?.yield).toBe(40);
+    expect(await getOperations(alice)).toHaveLength(1);
+    expect((await getOperations(alice)).at(-1)).toMatchObject({
+      ownerId: alice,
+      entity: "brew",
+      entityId: sharedId,
+      action: "delete",
+    });
+    expect((await getOperations(alice)).at(-1)?.payload).toBeUndefined();
+    expect((await getOperations(bob)).at(-1)?.action).toBe("upsert");
+  });
+
+  it("does not queue a tombstone when the owner's brew is already missing", async () => {
+    const missingId = "0198d3a4-1111-7000-8000-000000000022";
+
+    expect(await deleteBrew(alice, missingId)).toBe(false);
+    expect(await getOperations(alice)).toEqual([]);
   });
 
   it("clears one owner while preserving every other owner", async () => {

@@ -6,16 +6,20 @@ import {
   GitCompareArrows,
   History,
   Search,
+  Trash2,
   X,
 } from "lucide-react";
+import { deleteBrew } from "@/lib/db";
 import type { Bean, Brew } from "@/lib/models";
 import { EmptyState, PageHeading, formatDate } from "./ui";
 
 export function HistoryView({
+  ownerId,
   beans,
   brews,
   onLog,
 }: {
+  ownerId: string;
   beans: Bean[];
   brews: Brew[];
   onLog: () => void;
@@ -23,6 +27,8 @@ export function HistoryView({
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string>();
   const [compareId, setCompareId] = useState<string>();
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string>();
   const filtered = useMemo(
     () =>
       brews.filter((brew) => {
@@ -39,6 +45,29 @@ export function HistoryView({
     (selected
       ? brews.find((brew) => brew.id === selected.comparisonBrewId)
       : undefined);
+
+  async function removeSelected() {
+    if (!selected || deleting) return;
+    if (
+      !window.confirm(
+        "Permanently delete this brew log? This cannot be undone.",
+      )
+    )
+      return;
+    setDeleteError(undefined);
+    setDeleting(true);
+    try {
+      await deleteBrew(ownerId, selected.id);
+      setSelectedId(undefined);
+      setCompareId(undefined);
+    } catch {
+      setDeleteError(
+        "Couldn't delete this log. Your brew is still saved. Try again.",
+      );
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   if (!brews.length)
     return (
@@ -82,6 +111,7 @@ export function HistoryView({
               onClick={() => {
                 setSelectedId(brew.id);
                 setCompareId(undefined);
+                setDeleteError(undefined);
               }}
               className="flex min-h-20 w-full items-center gap-3 px-4 text-left transition hover:bg-canvas"
             >
@@ -225,6 +255,22 @@ export function HistoryView({
                 </p>
               </div>
             )}
+            <div className="mt-6 border-t border-line pt-4">
+              {deleteError && (
+                <p role="alert" className="mb-3 text-sm text-coral">
+                  {deleteError}
+                </p>
+              )}
+              <button
+                type="button"
+                className="flex min-h-11 items-center gap-2 rounded-md px-3 font-semibold text-coral transition hover:bg-coral/5 disabled:cursor-not-allowed disabled:opacity-45"
+                disabled={deleting}
+                onClick={() => void removeSelected()}
+              >
+                <Trash2 className="h-4 w-4" />
+                {deleting ? "Deleting..." : "Delete log"}
+              </button>
+            </div>
           </section>
         </div>
       )}

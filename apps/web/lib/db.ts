@@ -341,6 +341,21 @@ function operation(
   };
 }
 
+function deletionOperation(
+  ownerId: string,
+  entity: SyncEntity,
+  entityId: string,
+): Owned<SyncOperation> {
+  return {
+    ownerId,
+    operationId: makeId(),
+    entity,
+    entityId,
+    action: "delete",
+    createdAt: new Date().toISOString(),
+  };
+}
+
 export async function saveBean(ownerId: string, bean: Bean) {
   await db.transaction(
     "rw",
@@ -390,6 +405,37 @@ export async function saveBrew(ownerId: string, brew: Brew) {
       await assertOwnerWritable(ownerId);
       await db.brews.put({ ...pending, ownerId });
       await db.operations.add(operation(ownerId, "brew", brew.id, pending));
+    },
+  );
+}
+
+export async function deleteBrew(
+  ownerId: string,
+  id: string,
+): Promise<boolean> {
+  return db.transaction(
+    "rw",
+    [db.brews, db.operations, db.preferences],
+    async () => {
+      await assertOwnerWritable(ownerId);
+      const key = ownerKey(ownerId, id);
+      const current = await db.brews.get(key);
+      if (!current) return false;
+      const supersededOperationIds = (
+        await db.operations.where("ownerId").equals(ownerId).toArray()
+      )
+        .filter(
+          (pending) => pending.entity === "brew" && pending.entityId === id,
+        )
+        .map((pending) => pending.operationId);
+      await db.operations.bulkDelete(
+        supersededOperationIds.map((operationId) =>
+          ownerKey(ownerId, operationId),
+        ),
+      );
+      await db.brews.delete(key);
+      await db.operations.add(deletionOperation(ownerId, "brew", id));
+      return true;
     },
   );
 }

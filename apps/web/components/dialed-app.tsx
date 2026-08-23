@@ -284,6 +284,7 @@ function OwnerApplication({
     if (view === "history")
       return (
         <HistoryView
+          ownerId={ownerId}
           beans={beans}
           brews={brews}
           onLog={() => navigate("log")}
