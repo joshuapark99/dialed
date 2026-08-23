@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 
 async function completeOnboarding(page: Page) {
@@ -64,4 +65,207 @@ test("onboarding and the empty dashboard fit a desktop viewport", async ({
     path: testInfo.outputPath("desktop-home.png"),
     fullPage: true,
   });
+});
+
+test("anonymous views and exports exclude another owner's records", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await completeOnboarding(page);
+
+  await page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("dialed-local");
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("ownedBeans", "readwrite");
+      transaction.objectStore("ownedBeans").put({
+        id: "0198f06e-1620-7000-8000-000000000001",
+        ownerId: "account:foreign-account",
+        name: "Foreign owner coffee",
+        roaster: "Partition Roasters",
+        roastLevel: "light",
+        createdAt: "2026-08-22T12:00:00.000Z",
+      });
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+  });
+
+  await page.reload();
+  await page.getByRole("button", { name: "Setup" }).click();
+  await expect(page.getByText("Hualalai Kona")).toBeVisible();
+  await expect(page.getByText("Foreign owner coffee")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "History" }).click();
+  await expect(page.getByText("Foreign owner coffee")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Setup" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export JSON" }).click();
+  const download = await downloadPromise;
+  const contents = JSON.parse(
+    await readFile(await download.path(), "utf8"),
+  ) as {
+    beans: Array<{ name: string }>;
+  };
+  expect(contents.beans.map((bean) => bean.name)).toContain("Hualalai Kona");
+  expect(contents.beans.map((bean) => bean.name)).not.toContain(
+    "Foreign owner coffee",
+  );
+});
+
+test("blocks local partitions when account lookup fails and allows retry", async ({
+  page,
+}) => {
+  let lookupFails = true;
+  await page.addInitScript(() => {
+    localStorage.setItem("dialed-cloud-enabled", "true");
+  });
+  await page.route("**/api/v1/me", async (route) => {
+    await route.fulfill({ status: lookupFails ? 503 : 401 });
+  });
+
+  await page.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "Account unavailable" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Coffee")).toHaveCount(0);
+
+  lookupFails = false;
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByLabel("Coffee")).toBeVisible();
+});
+
+test("shows sync errors instead of a synced account label", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(() => {
+    localStorage.setItem("dialed-cloud-enabled", "true");
+  });
+  await page.route("**/api/v1/me", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        user: {
+          id: "alice",
+          email: "alice@example.com",
+          name: "Alice",
+        },
+      }),
+    });
+  });
+  await page.route("**/api/v1/sync/push", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ results: [] }),
+    });
+  });
+  await page.route("**/api/v1/sync/pull**", async (route) => {
+    await route.fulfill({ status: 503 });
+  });
+
+  await page.goto("/");
+  await completeOnboarding(page);
+
+  await expect(
+    page.getByText("Sync error", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(page.getByText("Cloud synced", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Synced", { exact: true })).toHaveCount(0);
+});
+
+test("authenticated cloud setup bypasses the local onboarding marker", async ({
+  page,
+}) => {
+  const createdAt = "2026-08-22T12:00:00.000Z";
+  const beanId = "0198f06e-1620-7000-8000-000000000101";
+  const machineId = "0198f06e-1620-7000-8000-000000000102";
+  const grinderId = "0198f06e-1620-7000-8000-000000000103";
+  await page.addInitScript(() => {
+    localStorage.setItem("dialed-cloud-enabled", "true");
+  });
+  await page.route("**/api/v1/me", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        user: {
+          id: "alice",
+          email: "alice@example.com",
+          name: "Alice",
+        },
+      }),
+    });
+  });
+  await page.route("**/api/v1/sync/pull**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        operations: [
+          {
+            operationId: "0198f06e-1620-7000-8000-000000000201",
+            entity: "bean",
+            entityId: beanId,
+            action: "upsert",
+            payload: {
+              id: beanId,
+              name: "Cloud coffee",
+              roaster: "Cloud Roasters",
+              roastLevel: "medium",
+              createdAt,
+            },
+            revision: 1,
+          },
+          {
+            operationId: "0198f06e-1620-7000-8000-000000000202",
+            entity: "machine",
+            entityId: machineId,
+            action: "upsert",
+            payload: {
+              id: machineId,
+              name: "Cloud machine",
+              temperatureControl: "none",
+              hasPressureControl: false,
+              hasPreinfusion: false,
+              createdAt,
+            },
+            revision: 2,
+          },
+          {
+            operationId: "0198f06e-1620-7000-8000-000000000203",
+            entity: "grinder",
+            entityId: grinderId,
+            action: "upsert",
+            payload: {
+              id: grinderId,
+              name: "Cloud grinder",
+              finerDirection: "lower",
+              createdAt,
+            },
+            revision: 3,
+          },
+        ],
+        cursor: 3,
+        hasMore: false,
+      }),
+    });
+  });
+
+  await page.goto("/");
+
+  await expect(
+    page.getByRole("heading", { name: "Ready for the next shot?" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Coffee")).toHaveCount(0);
 });

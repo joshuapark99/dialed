@@ -16,7 +16,7 @@ import {
   UserRound,
 } from "lucide-react";
 import {
-  clearLocalData,
+  discardAnonymousData,
   makeId,
   saveBean,
   saveGrinder,
@@ -31,7 +31,8 @@ import type {
   RoastLevel,
 } from "@/lib/models";
 import {
-  deleteCloudAccount,
+  AccountMismatchError,
+  deleteAccountAndClear,
   signInWithGoogle,
   signOut,
   type SyncStatus,
@@ -40,27 +41,38 @@ import { PageHeading, Segmented } from "./ui";
 
 type SetupTab = "coffee" | "equipment" | "settings";
 
+export type OwnerCacheResetResult =
+  | { cleared: false; reason: "pending-operations"; pendingCount: number }
+  | { cleared: true; rebuilt: boolean };
+
 export function SetupView({
+  ownerId,
   beans,
   machines,
   grinders,
   brews,
+  pendingCount,
   account,
   syncStatus,
   onSync,
+  onResetOwnerCache,
   onAccountChanged,
 }: {
+  ownerId: string;
   beans: Bean[];
   machines: Machine[];
   grinders: Grinder[];
   brews: Brew[];
+  pendingCount: number;
   account: AccountUser | null;
   syncStatus: SyncStatus;
-  onSync: () => Promise<void>;
+  onSync: () => Promise<boolean>;
+  onResetOwnerCache: () => Promise<OwnerCacheResetResult | undefined>;
   onAccountChanged: () => Promise<void>;
 }) {
   const [tab, setTab] = useState<SetupTab>("coffee");
   const [adding, setAdding] = useState<"bean" | "machine" | "grinder">();
+  const [resetting, setResetting] = useState(false);
 
   function download(format: "json" | "csv") {
     const data =
@@ -78,23 +90,72 @@ export function SetupView({
   }
 
   async function clear() {
+    if (!account) {
+      if (
+        !window.confirm(
+          "Permanently delete all anonymous coffee, equipment, and brew data from this device? This cannot be undone.",
+        )
+      )
+        return;
+      setResetting(true);
+      try {
+        await discardAnonymousData();
+      } finally {
+        setResetting(false);
+      }
+      return;
+    }
+
     if (
-      window.confirm(
-        "Clear all local coffee, equipment, and brew data? This cannot be undone.",
+      !window.confirm(
+        "Rebuild this account's local cache from the cloud? Synced local data will be removed and downloaded again.",
       )
     )
-      await clearLocalData();
+      return;
+    setResetting(true);
+    try {
+      const result = await onResetOwnerCache();
+      if (!result) {
+        window.alert(
+          "The local cache was not changed. Try again when account sync is available.",
+        );
+        return;
+      }
+      if (!result.cleared) {
+        window.alert(
+          `${result.pendingCount} unsynced operation${result.pendingCount === 1 ? "" : "s"} must be synced first. Nothing was cleared.`,
+        );
+        return;
+      }
+      if (!result.rebuilt) {
+        window.alert(
+          "The local cache was cleared, but it could not be rebuilt. Sync again when the connection is available.",
+        );
+        return;
+      }
+      window.alert("This account's local cache was rebuilt from the cloud.");
+    } finally {
+      setResetting(false);
+    }
   }
 
   async function removeAccount() {
+    if (!account) return;
     if (
       !window.confirm(
         "Delete your Dialed account and all cloud data? This cannot be undone.",
       )
     )
       return;
-    await deleteCloudAccount();
-    await clearLocalData();
+    try {
+      await deleteAccountAndClear(ownerId, account.id);
+    } catch (error) {
+      if (error instanceof AccountMismatchError) {
+        await onAccountChanged();
+        return;
+      }
+      throw error;
+    }
     await onAccountChanged();
   }
 
@@ -188,7 +249,7 @@ export function SetupView({
                     type="button"
                     className="button-secondary"
                     onClick={() => void onSync()}
-                    disabled={syncStatus === "syncing"}
+                    disabled={syncStatus === "syncing" || resetting}
                   >
                     <RefreshCw
                       className={`h-4 w-4 ${syncStatus === "syncing" ? "animate-spin" : ""}`}
@@ -199,6 +260,7 @@ export function SetupView({
                     type="button"
                     className="button-secondary"
                     onClick={() => void signOut().then(onAccountChanged)}
+                    disabled={resetting}
                   >
                     <LogOut className="h-4 w-4" />
                     Sign out
@@ -255,9 +317,23 @@ export function SetupView({
               type="button"
               className="flex min-h-14 w-full items-center gap-3 px-4 text-left text-coral hover:bg-coral/5"
               onClick={() => void clear()}
+              disabled={
+                resetting || (Boolean(account) && syncStatus === "syncing")
+              }
             >
               <Trash2 className="h-5 w-5" />
-              <span className="flex-1 font-semibold">Clear local data</span>
+              <span className="flex-1">
+                <span className="block font-semibold">
+                  {account ? "Rebuild local cache" : "Delete anonymous data"}
+                </span>
+                <span className="block text-xs text-muted">
+                  {account
+                    ? pendingCount
+                      ? `${pendingCount} unsynced operation${pendingCount === 1 ? "" : "s"}; sync before rebuilding`
+                      : "Replace this account's local data from the cloud"
+                    : "Permanently remove local-mode data from this device"}
+                </span>
+              </span>
             </button>
           </section>
           {account && (
@@ -265,6 +341,7 @@ export function SetupView({
               type="button"
               className="flex min-h-12 w-full items-center justify-center gap-2 rounded-md border border-coral/30 bg-white px-4 font-semibold text-coral"
               onClick={() => void removeAccount()}
+              disabled={resetting}
             >
               <Trash2 className="h-4 w-4" />
               Delete cloud account
@@ -276,7 +353,11 @@ export function SetupView({
         </div>
       )}
       {adding && (
-        <AddDialog kind={adding} onClose={() => setAdding(undefined)} />
+        <AddDialog
+          ownerId={ownerId}
+          kind={adding}
+          onClose={() => setAdding(undefined)}
+        />
       )}
     </div>
   );
@@ -329,9 +410,11 @@ function LibrarySection({
 }
 
 function AddDialog({
+  ownerId,
   kind,
   onClose,
 }: {
+  ownerId: string;
   kind: "bean" | "machine" | "grinder";
   onClose: () => void;
 }) {
@@ -341,7 +424,7 @@ function AddDialog({
   async function save() {
     const createdAt = new Date().toISOString();
     if (kind === "bean")
-      await saveBean({
+      await saveBean(ownerId, {
         id: makeId(),
         name: name.trim(),
         roaster: secondary.trim(),
@@ -349,7 +432,7 @@ function AddDialog({
         createdAt,
       });
     if (kind === "machine")
-      await saveMachine({
+      await saveMachine(ownerId, {
         id: makeId(),
         name: name.trim(),
         temperatureControl: "none",
@@ -358,7 +441,7 @@ function AddDialog({
         createdAt,
       });
     if (kind === "grinder")
-      await saveGrinder({
+      await saveGrinder(ownerId, {
         id: makeId(),
         name: name.trim(),
         finerDirection: "lower",

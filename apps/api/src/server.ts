@@ -60,6 +60,28 @@ async function requirePrincipal(
   return principal;
 }
 
+async function requireExpectedAccount(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  principal: Principal,
+): Promise<boolean> {
+  const accountHeader = request.headers["x-dialed-account-id"];
+  const expectedAccountId = Array.isArray(accountHeader)
+    ? accountHeader[0]
+    : accountHeader;
+  if (expectedAccountId === principal.id) return true;
+
+  await reply.code(409).send({
+    error: {
+      code: "account_mismatch",
+      message: "Authenticated account does not match the expected account",
+      expectedAccountId: expectedAccountId ?? null,
+      actualAccount: principal,
+    },
+  });
+  return false;
+}
+
 export function createServer(
   dependencies: ServerDependencies,
 ): FastifyInstance {
@@ -123,6 +145,7 @@ export function createServer(
   app.post("/v1/sync/push", async (request, reply) => {
     const principal = await requirePrincipal(request, reply, dependencies.auth);
     if (!principal) return;
+    if (!(await requireExpectedAccount(request, reply, principal))) return;
     const parsed = pushBodySchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({
@@ -143,6 +166,7 @@ export function createServer(
   app.get("/v1/sync/pull", async (request, reply) => {
     const principal = await requirePrincipal(request, reply, dependencies.auth);
     if (!principal) return;
+    if (!(await requireExpectedAccount(request, reply, principal))) return;
     const parsed = pullQuerySchema.safeParse(request.query);
     if (!parsed.success) {
       return reply.code(400).send({
@@ -199,6 +223,7 @@ export function createServer(
   app.delete("/v1/account", async (request, reply) => {
     const principal = await requirePrincipal(request, reply, dependencies.auth);
     if (!principal) return;
+    if (!(await requireExpectedAccount(request, reply, principal))) return;
     const parsed = deleteAccountBodySchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({

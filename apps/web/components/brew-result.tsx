@@ -13,12 +13,14 @@ import type { Bean, Brew } from "@/lib/models";
 import { formatDate } from "./ui";
 
 export function BrewResult({
+  ownerId,
   brew,
   bean,
   reference,
   onDone,
   onLogAnother,
 }: {
+  ownerId: string;
   brew: Brew;
   bean?: Bean;
   reference?: Brew;
@@ -26,7 +28,7 @@ export function BrewResult({
   onLogAnother: () => void;
 }) {
   async function toggleDialed() {
-    await updateBrew(brew.id, {
+    await updateBrew(ownerId, brew.id, {
       dialedAt: brew.dialedAt ? undefined : new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });

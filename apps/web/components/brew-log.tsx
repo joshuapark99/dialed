@@ -11,12 +11,17 @@ import {
   Sparkles,
 } from "lucide-react";
 import { calculateBrewMetrics } from "@dialed/domain";
+import {
+  parseOptionalFiniteMeasurement,
+  parseRequiredPositiveMeasurement,
+} from "@/lib/brew-form";
 import { makeId, saveBrew } from "@/lib/db";
 import type { Bean, Brew, Grinder, Machine, Taste } from "@/lib/models";
 import { getRecommendation } from "@/lib/recommendation";
 import { PageHeading, ScorePicker } from "./ui";
 
 interface BrewLogProps {
+  ownerId: string;
   beans: Bean[];
   machines: Machine[];
   grinders: Grinder[];
@@ -34,6 +39,7 @@ const initialTaste: Taste = {
 };
 
 export function BrewLog({
+  ownerId,
   beans,
   machines,
   grinders,
@@ -58,9 +64,20 @@ export function BrewLog({
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const doseNumber = Number(dose);
-  const yieldNumber = Number(shotYield);
-  const durationNumber = Number(duration);
+  const parsedDose = parseRequiredPositiveMeasurement(dose);
+  const parsedYield = parseRequiredPositiveMeasurement(shotYield);
+  const parsedDuration = parseRequiredPositiveMeasurement(duration);
+  const parsedTemperature = parseOptionalFiniteMeasurement(temperature);
+  const parsedPressure = parseOptionalFiniteMeasurement(pressure, {
+    minimum: 0,
+    exclusive: true,
+  });
+  const parsedPreinfusion = parseOptionalFiniteMeasurement(preinfusion, {
+    minimum: 0,
+  });
+  const doseNumber = parsedDose.valid ? parsedDose.value : 0;
+  const yieldNumber = parsedYield.valid ? parsedYield.value : 0;
+  const durationNumber = parsedDuration.valid ? parsedDuration.value : 0;
   const metrics =
     doseNumber > 0 && yieldNumber > 0 && durationNumber > 0
       ? calculateBrewMetrics({
@@ -83,14 +100,18 @@ export function BrewLog({
       ),
     [beanId, machineId, grinderId, brews],
   );
-  const valid =
+  const valid = Boolean(
     beanId &&
     machine &&
     grinder &&
-    doseNumber > 0 &&
-    yieldNumber > 0 &&
-    durationNumber > 0 &&
-    grind.trim();
+    parsedDose.valid &&
+    parsedYield.valid &&
+    parsedDuration.valid &&
+    parsedTemperature.valid &&
+    parsedPressure.valid &&
+    parsedPreinfusion.valid &&
+    grind.trim(),
+  );
 
   async function save() {
     if (!valid || saving) return;
@@ -103,9 +124,13 @@ export function BrewLog({
       grind: grind.trim(),
       observation,
       taste,
-      temperature: temperature ? Number(temperature) : undefined,
-      pressure: pressure ? Number(pressure) : undefined,
-      preinfusion: preinfusion ? Number(preinfusion) : undefined,
+      temperature: parsedTemperature.valid
+        ? parsedTemperature.value
+        : undefined,
+      pressure: parsedPressure.valid ? parsedPressure.value : undefined,
+      preinfusion: parsedPreinfusion.valid
+        ? parsedPreinfusion.value
+        : undefined,
       basket: basket.trim() || undefined,
       puckPrep: puckPrep.trim() || undefined,
     };
@@ -118,9 +143,13 @@ export function BrewLog({
       yield: yieldNumber,
       duration: durationNumber,
       grind: grind.trim(),
-      temperature: temperature ? Number(temperature) : undefined,
-      pressure: pressure ? Number(pressure) : undefined,
-      preinfusion: preinfusion ? Number(preinfusion) : undefined,
+      temperature: parsedTemperature.valid
+        ? parsedTemperature.value
+        : undefined,
+      pressure: parsedPressure.valid ? parsedPressure.value : undefined,
+      preinfusion: parsedPreinfusion.valid
+        ? parsedPreinfusion.value
+        : undefined,
       basket: basket.trim() || undefined,
       puckPrep: puckPrep.trim() || undefined,
       observation,
@@ -134,7 +163,7 @@ export function BrewLog({
       updatedAt: createdAt,
       syncState: "local",
     };
-    await saveBrew(brew);
+    await saveBrew(ownerId, brew);
     setSaving(false);
     onSaved(brew);
   }
@@ -216,6 +245,7 @@ export function BrewLog({
                 onChange={setDose}
                 unit="g"
                 step="0.1"
+                min="0.1"
               />
               <NumberField
                 label="Yield"
@@ -223,6 +253,7 @@ export function BrewLog({
                 onChange={setShotYield}
                 unit="g"
                 step="0.1"
+                min="0.1"
               />
               <NumberField
                 label="Time"
@@ -230,6 +261,7 @@ export function BrewLog({
                 onChange={setDuration}
                 unit="s"
                 step="1"
+                min="1"
               />
               <label>
                 <span className="label">Grind</span>
@@ -338,6 +370,7 @@ export function BrewLog({
                     onChange={setPressure}
                     unit="bar"
                     step="0.1"
+                    min="0.1"
                   />
                 )}
                 {machine?.hasPreinfusion && (
@@ -347,6 +380,7 @@ export function BrewLog({
                     onChange={setPreinfusion}
                     unit="s"
                     step="1"
+                    min="0"
                   />
                 )}
                 <label>
@@ -440,12 +474,14 @@ function NumberField({
   onChange,
   unit,
   step,
+  min,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   unit: string;
   step: string;
+  min?: string;
 }) {
   return (
     <label>
@@ -453,7 +489,7 @@ function NumberField({
       <span className="relative block">
         <input
           type="number"
-          min="0"
+          min={min}
           step={step}
           className="field pr-10"
           value={value}

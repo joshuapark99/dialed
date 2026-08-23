@@ -55,12 +55,14 @@ Status: Planned
 
 ## DIAL-007: Persistence and account isolation
 
-Status: Planned (next priority)
+Status: Complete
 
 - Partition local data, sync cursors, and pending operations by anonymous or authenticated owner.
+- Use owner-inclusive IndexedDB primary keys so identical cloud IDs can coexist across accounts, with transactional migration from the legacy stores.
 - Serialize synchronization, handle expired sessions explicitly, and make local clearing safe.
 - Validate remote entity payloads before applying them to IndexedDB.
-- Decide whether to retain the operation ledger as the cloud source of truth or materialize its payloads into the normalized PostgreSQL tables.
+- Bind sync and account deletion to the UI-resolved account, and commit each validated pull page with its cursor atomically.
+- Retain the validated append-only operation ledger as the authoritative cloud source of truth; normalized PostgreSQL tables are not materialized from ledger payloads.
 
 ## Later releases
 

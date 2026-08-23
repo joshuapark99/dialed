@@ -2,11 +2,17 @@
 
 import { useState } from "react";
 import { ArrowRight, Coffee, Gauge, RotateCw } from "lucide-react";
-import { db, makeId, saveBean, saveGrinder, saveMachine } from "@/lib/db";
+import {
+  makeId,
+  saveBean,
+  saveGrinder,
+  saveMachine,
+  setOwnerPreference,
+} from "@/lib/db";
 import type { RoastLevel, TemperatureControl } from "@/lib/models";
 import { Brand, Segmented } from "./ui";
 
-export function Onboarding() {
+export function Onboarding({ ownerId }: { ownerId: string }) {
   const [step, setStep] = useState(0);
   const [beanName, setBeanName] = useState("");
   const [roaster, setRoaster] = useState("");
@@ -21,14 +27,14 @@ export function Onboarding() {
 
   async function finish() {
     const createdAt = new Date().toISOString();
-    await saveBean({
+    await saveBean(ownerId, {
       id: makeId(),
       name: beanName.trim(),
       roaster: roaster.trim(),
       roastLevel: roast,
       createdAt,
     });
-    await saveMachine({
+    await saveMachine(ownerId, {
       id: makeId(),
       name: machine.trim(),
       temperatureControl,
@@ -36,13 +42,13 @@ export function Onboarding() {
       hasPreinfusion: false,
       createdAt,
     });
-    await saveGrinder({
+    await saveGrinder(ownerId, {
       id: makeId(),
       name: grinder.trim(),
       finerDirection,
       createdAt,
     });
-    await db.preferences.put({ key: "onboarded", value: "true" });
+    await setOwnerPreference(ownerId, "onboarded", "true");
   }
 
   const valid =

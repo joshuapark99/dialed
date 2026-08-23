@@ -7,19 +7,40 @@ import {
   History,
   Home,
   Plus,
+  RefreshCw,
   Settings2,
   Wifi,
   WifiOff,
 } from "lucide-react";
-import { db } from "@/lib/db";
+import {
+  ANONYMOUS_OWNER_ID,
+  db,
+  getBeans,
+  getBrews,
+  getGrinders,
+  getMachines,
+  getOwnerPreference,
+  setOwnerPreference,
+} from "@/lib/db";
 import type { AccountUser, Brew } from "@/lib/models";
-import { getCurrentUser, synchronize, type SyncStatus } from "@/lib/sync";
+import { requiresOnboarding } from "@/lib/onboarding-state";
+import {
+  AccountMismatchError,
+  AuthenticationExpiredError,
+  getCurrentUser,
+  isCloudIdentityStorageEvent,
+  ownerIdForAccount,
+  OwnerCacheRebuildError,
+  resetAndSynchronize,
+  synchronize,
+  type SyncStatus,
+} from "@/lib/sync";
 import { BrewLog } from "./brew-log";
 import { BrewResult } from "./brew-result";
 import { HistoryView } from "./history-view";
 import { HomeView } from "./home-view";
 import { Onboarding } from "./onboarding";
-import { SetupView } from "./setup-view";
+import { SetupView, type OwnerCacheResetResult } from "./setup-view";
 import { Brand } from "./ui";
 
 type View = "home" | "log" | "history" | "setup" | "result";
@@ -31,68 +52,179 @@ const navItems = [
 ];
 
 export function DialedApp() {
-  const beans =
-    useLiveQuery(() => db.beans.orderBy("createdAt").reverse().toArray(), []) ??
-    [];
-  const machines =
-    useLiveQuery(
-      () => db.machines.orderBy("createdAt").reverse().toArray(),
-      [],
-    ) ?? [];
-  const grinders =
-    useLiveQuery(
-      () => db.grinders.orderBy("createdAt").reverse().toArray(),
-      [],
-    ) ?? [];
-  const brews =
-    useLiveQuery(() => db.brews.orderBy("createdAt").reverse().toArray(), []) ??
-    [];
-  const pendingCount = useLiveQuery(() => db.operations.count(), []) ?? 0;
+  const [accountState, setAccountState] = useState<
+    | { status: "loading" }
+    | { status: "error" }
+    | { status: "resolved"; account: AccountUser | null }
+  >({ status: "loading" });
+
+  const refreshAccount = useCallback(async () => {
+    setAccountState({ status: "loading" });
+    try {
+      const account = await getCurrentUser();
+      setAccountState({ status: "resolved", account });
+    } catch {
+      setAccountState({ status: "error" });
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshAccount();
+  }, [refreshAccount]);
+
+  useEffect(() => {
+    const refreshChangedIdentity = (event: StorageEvent) => {
+      if (isCloudIdentityStorageEvent(event)) void refreshAccount();
+    };
+    window.addEventListener("storage", refreshChangedIdentity);
+    return () => window.removeEventListener("storage", refreshChangedIdentity);
+  }, [refreshAccount]);
+
+  if (accountState.status === "loading") return <Loading />;
+  if (accountState.status === "error") {
+    return <AccountLookupError onRetry={refreshAccount} />;
+  }
+
+  const { account } = accountState;
+  const ownerId = account ? ownerIdForAccount(account.id) : ANONYMOUS_OWNER_ID;
+  return (
+    <OwnerApplication
+      key={ownerId}
+      ownerId={ownerId}
+      account={account}
+      onAccountChanged={refreshAccount}
+    />
+  );
+}
+
+function OwnerApplication({
+  ownerId,
+  account,
+  onAccountChanged,
+}: {
+  ownerId: string;
+  account: AccountUser | null;
+  onAccountChanged: () => Promise<void>;
+}) {
+  const beans = useLiveQuery(
+    async () => (await getBeans(ownerId)).reverse(),
+    [ownerId],
+  );
+  const machines = useLiveQuery(
+    async () => (await getMachines(ownerId)).reverse(),
+    [ownerId],
+  );
+  const grinders = useLiveQuery(
+    async () => (await getGrinders(ownerId)).reverse(),
+    [ownerId],
+  );
+  const brews = useLiveQuery(
+    async () => (await getBrews(ownerId)).reverse(),
+    [ownerId],
+  );
+  const pendingCount = useLiveQuery(
+    () => db.operations.where("ownerId").equals(ownerId).count(),
+    [ownerId],
+  );
   const setupState = useLiveQuery(
     async () => ({
-      onboarded: await db.preferences.get("onboarded"),
-      profileCount: await db.beans.count(),
+      onboarded: await getOwnerPreference(ownerId, "onboarded"),
+      profileCount: await db.beans.where("ownerId").equals(ownerId).count(),
     }),
-    [],
+    [ownerId],
   );
   const [view, setView] = useState<View>("home");
   const [result, setResult] = useState<Brew>();
   const [online, setOnline] = useState(true);
-  const [account, setAccount] = useState<AccountUser | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("local");
-  const loaded = setupState !== undefined;
-
-  const refreshAccount = useCallback(async () => {
-    const current = await getCurrentUser();
-    setAccount(current);
-    setSyncStatus(current ? "synced" : "local");
-  }, []);
+  const [resettingOwner, setResettingOwner] = useState(false);
+  const loaded =
+    setupState !== undefined &&
+    beans !== undefined &&
+    machines !== undefined &&
+    grinders !== undefined &&
+    brews !== undefined &&
+    pendingCount !== undefined;
 
   const runSync = useCallback(async () => {
+    if (!account) {
+      setSyncStatus("local");
+      return false;
+    }
     if (!navigator.onLine) {
       setSyncStatus("offline");
-      return;
+      return false;
     }
     setSyncStatus("syncing");
     try {
-      await synchronize();
+      await synchronize(ownerId);
       setSyncStatus("synced");
-    } catch {
+      return true;
+    } catch (error) {
+      if (
+        error instanceof AuthenticationExpiredError ||
+        error instanceof AccountMismatchError
+      ) {
+        setSyncStatus("local");
+        await onAccountChanged();
+        return false;
+      }
       setSyncStatus("error");
+      return false;
     }
-  }, []);
+  }, [account, onAccountChanged, ownerId]);
+
+  const resetOwnerCache = useCallback(async (): Promise<
+    OwnerCacheResetResult | undefined
+  > => {
+    if (!account) return undefined;
+    if (!navigator.onLine) {
+      setSyncStatus("offline");
+      return undefined;
+    }
+    setResettingOwner(true);
+    setSyncStatus("syncing");
+    let cacheCleared = false;
+    try {
+      const result = await resetAndSynchronize(ownerId);
+      if (!result.cleared) {
+        setSyncStatus("local");
+        return result;
+      }
+      cacheCleared = true;
+      await setOwnerPreference(ownerId, "onboarded", "true");
+      setSyncStatus("synced");
+      return { cleared: true, rebuilt: true };
+    } catch (error) {
+      const syncError =
+        error instanceof OwnerCacheRebuildError ? error.cause : error;
+      if (
+        syncError instanceof AuthenticationExpiredError ||
+        syncError instanceof AccountMismatchError
+      ) {
+        setSyncStatus("local");
+        await onAccountChanged();
+      } else {
+        setSyncStatus("error");
+      }
+      return error instanceof OwnerCacheRebuildError || cacheCleared
+        ? { cleared: true, rebuilt: false }
+        : undefined;
+    } finally {
+      setResettingOwner(false);
+    }
+  }, [account, onAccountChanged, ownerId]);
 
   useEffect(() => {
     setOnline(navigator.onLine);
     const update = () => setOnline(navigator.onLine);
     window.addEventListener("online", update);
     window.addEventListener("offline", update);
-    void refreshAccount();
     return () => {
       window.removeEventListener("online", update);
       window.removeEventListener("offline", update);
     };
-  }, [refreshAccount]);
+  }, []);
 
   useEffect(() => {
     if (!account) return;
@@ -105,14 +237,17 @@ export function DialedApp() {
     if (account && online) void runSync();
   }, [account, online, pendingCount, runSync]);
 
-  if (!loaded) return <Loading />;
+  if (!loaded || resettingOwner) return <Loading />;
   if (
-    !setupState?.onboarded ||
-    !setupState.profileCount ||
-    !machines.length ||
-    !grinders.length
+    requiresOnboarding({
+      authenticated: Boolean(account),
+      onboarded: setupState?.onboarded,
+      beanCount: setupState?.profileCount ?? 0,
+      machineCount: machines.length,
+      grinderCount: grinders.length,
+    })
   )
-    return <Onboarding />;
+    return <Onboarding ownerId={ownerId} />;
 
   const navigate = (next: View) => {
     setView(next);
@@ -123,6 +258,7 @@ export function DialedApp() {
     if (view === "log")
       return (
         <BrewLog
+          ownerId={ownerId}
           beans={beans}
           machines={machines}
           grinders={grinders}
@@ -137,6 +273,7 @@ export function DialedApp() {
     if (view === "result" && result)
       return (
         <BrewResult
+          ownerId={ownerId}
           brew={result}
           bean={beans.find((bean) => bean.id === result.beanId)}
           reference={brews.find((brew) => brew.id === result.comparisonBrewId)}
@@ -155,14 +292,17 @@ export function DialedApp() {
     if (view === "setup")
       return (
         <SetupView
+          ownerId={ownerId}
           beans={beans}
           machines={machines}
           grinders={grinders}
           brews={brews}
+          pendingCount={pendingCount}
           account={account}
           syncStatus={syncStatus}
           onSync={runSync}
-          onAccountChanged={refreshAccount}
+          onResetOwnerCache={resetOwnerCache}
+          onAccountChanged={onAccountChanged}
         />
       );
     return (
@@ -208,15 +348,7 @@ export function DialedApp() {
           ) : (
             <WifiOff className="h-4 w-4 text-sun" />
           )}
-          {!online
-            ? "Working offline"
-            : account
-              ? syncStatus === "syncing"
-                ? "Syncing changes"
-                : pendingCount
-                  ? `${pendingCount} pending`
-                  : "Cloud synced"
-              : "Local data ready"}
+          {desktopStatusLabel(online, account, syncStatus, pendingCount)}
         </div>
       </aside>
 
@@ -234,15 +366,7 @@ export function DialedApp() {
               ) : (
                 <WifiOff className="h-3 w-3" />
               )}
-              {!online
-                ? "Offline"
-                : syncStatus === "syncing"
-                  ? "Syncing"
-                  : account
-                    ? pendingCount
-                      ? `${pendingCount} pending`
-                      : "Synced"
-                    : "Saved locally"}
+              {compactStatusLabel(online, account, syncStatus, pendingCount)}
             </div>
           </div>
         </header>
@@ -323,4 +447,55 @@ function Loading() {
       </div>
     </div>
   );
+}
+
+function AccountLookupError({ onRetry }: { onRetry: () => Promise<void> }) {
+  return (
+    <main className="flex min-h-dvh items-center justify-center px-5">
+      <section role="alert" className="max-w-md text-center">
+        <Coffee className="mx-auto h-8 w-8 text-coral" />
+        <h1 className="mt-4 text-2xl font-black">Account unavailable</h1>
+        <p className="mt-2 text-sm leading-relaxed text-muted">
+          Dialed could not confirm which account owns this device's data. Try
+          again before continuing.
+        </p>
+        <button
+          type="button"
+          className="button-primary mx-auto mt-5"
+          onClick={() => void onRetry()}
+        >
+          <RefreshCw className="h-4 w-4" />
+          Retry
+        </button>
+      </section>
+    </main>
+  );
+}
+
+function desktopStatusLabel(
+  online: boolean,
+  account: AccountUser | null,
+  syncStatus: SyncStatus,
+  pendingCount: number,
+): string {
+  if (!online || syncStatus === "offline") return "Working offline";
+  if (!account) return "Local data ready";
+  if (syncStatus === "syncing") return "Syncing changes";
+  if (syncStatus === "error") return "Sync error";
+  if (syncStatus === "local") return "Cloud not synced";
+  return pendingCount ? `${pendingCount} pending` : "Cloud synced";
+}
+
+function compactStatusLabel(
+  online: boolean,
+  account: AccountUser | null,
+  syncStatus: SyncStatus,
+  pendingCount: number,
+): string {
+  if (!online || syncStatus === "offline") return "Offline";
+  if (!account) return "Saved locally";
+  if (syncStatus === "syncing") return "Syncing";
+  if (syncStatus === "error") return "Sync error";
+  if (syncStatus === "local") return "Not synced";
+  return pendingCount ? `${pendingCount} pending` : "Synced";
 }
