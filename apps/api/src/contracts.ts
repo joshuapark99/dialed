@@ -1,13 +1,28 @@
 import { z } from "zod";
 
-export const syncEntitySchema = z.enum(["bean", "machine", "grinder", "brew"]);
+export const syncEntitySchema = z.enum([
+  "coffee",
+  "bean",
+  "machine",
+  "grinder",
+  "brew",
+]);
 
 const remoteEntityIdSchema = z.uuidv7();
 const timestampSchema = z.string().datetime({ offset: true });
 const requiredTextSchema = z.string().trim().min(1);
+const optionalTextSchema = requiredTextSchema.optional();
 const finitePositiveSchema = z.number().finite().positive();
+const roastLevelPayloadSchema = z.enum([
+  "light",
+  "medium-light",
+  "medium",
+  "medium-dark",
+  "dark",
+  "unknown",
+]);
 
-const beanPayloadSchema = z
+const legacyBeanPayloadSchema = z
   .object({
     id: remoteEntityIdSchema,
     name: requiredTextSchema,
@@ -17,6 +32,46 @@ const beanPayloadSchema = z
     createdAt: timestampSchema,
   })
   .strict();
+
+const coffeePayloadSchema = z
+  .object({
+    id: remoteEntityIdSchema,
+    name: requiredTextSchema,
+    roaster: requiredTextSchema,
+    originCountry: requiredTextSchema.optional(),
+    originRegion: requiredTextSchema.optional(),
+    producer: requiredTextSchema.optional(),
+    process: requiredTextSchema.optional(),
+    varietal: requiredTextSchema.optional(),
+    elevationMeters: z.number().int().min(1).max(9000).optional(),
+    roastLevel: roastLevelPayloadSchema,
+    notes: optionalTextSchema,
+    createdAt: timestampSchema,
+  })
+  .strict();
+
+const coffeeBagPayloadSchema = z
+  .object({
+    id: remoteEntityIdSchema,
+    coffeeId: remoteEntityIdSchema,
+    roastedOn: z.string().date().optional(),
+    purchasedOn: z.string().date().optional(),
+    openedOn: z.string().date().optional(),
+    startingWeightGrams: z
+      .number()
+      .finite()
+      .positive()
+      .max(100_000)
+      .optional(),
+    notes: optionalTextSchema,
+    createdAt: timestampSchema,
+  })
+  .strict();
+
+const beanPayloadSchema = z.union([
+  coffeeBagPayloadSchema,
+  legacyBeanPayloadSchema,
+]);
 
 const machinePayloadSchema = z
   .object({
@@ -107,6 +162,7 @@ const brewPayloadSchema = z
   .strict();
 
 const payloadSchemas = {
+  coffee: coffeePayloadSchema,
   bean: beanPayloadSchema,
   machine: machinePayloadSchema,
   grinder: grinderPayloadSchema,

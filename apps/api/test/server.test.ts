@@ -74,6 +74,32 @@ const signedOut: AuthService = {
   },
 };
 
+const coffeePayload = {
+  id: "0198d4a4-3ad8-7fa1-b653-9a51a55d4f90",
+  name: "Hualalai Kona",
+  roaster: "Coffee Purveyors",
+  originCountry: "United States",
+  originRegion: "Kona, Hawaii",
+  producer: "Kona Hills Estate",
+  process: "Washed",
+  varietal: "Typica",
+  elevationMeters: 610,
+  roastLevel: "medium-light",
+  notes: "Milk chocolate and orange",
+  createdAt: "2026-08-22T12:00:00.000Z",
+} as const;
+
+const coffeeBagPayload = {
+  id: "0198d4a4-3ad8-7fa1-b653-9a51a55d4f91",
+  coffeeId: coffeePayload.id,
+  roastedOn: "2026-08-15",
+  purchasedOn: "2026-08-18",
+  openedOn: "2026-08-22",
+  startingWeightGrams: 340,
+  notes: "First bag",
+  createdAt: "2026-08-22T12:00:00.000Z",
+} as const;
+
 test("health and readiness expose different concerns", async () => {
   const store = new MemoryStore();
   const app = createServer({ auth: signedOut, store });
@@ -198,6 +224,65 @@ test("sync accepts each valid entity payload before storing it", async () => {
   await app.close();
 });
 
+test("sync accepts current Coffee and bag payloads", async () => {
+  const store = new MemoryStore();
+  const app = createServer({ auth: signedIn, store });
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/sync/push",
+    headers: { "x-dialed-account-id": "user-1" },
+    payload: {
+      operations: [
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fa0",
+          entity: "coffee",
+          entityId: coffeePayload.id,
+          action: "upsert",
+          payload: coffeePayload,
+        },
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fa1",
+          entity: "bean",
+          entityId: coffeeBagPayload.id,
+          action: "upsert",
+          payload: coffeeBagPayload,
+        },
+      ],
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(store.pushCalls, 1);
+  assert.equal(store.operations.length, 2);
+  await app.close();
+});
+
+test("sync continues to accept a legacy bean payload", async () => {
+  const store = new MemoryStore();
+  const app = createServer({ auth: signedIn, store });
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/sync/push",
+    headers: { "x-dialed-account-id": "user-1" },
+    payload: {
+      operations: [
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fa2",
+          entity: "bean",
+          entityId: syncEntityFixtures.bean.id,
+          action: "upsert",
+          payload: syncEntityFixtures.bean,
+        },
+      ],
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(store.pushCalls, 1);
+  assert.equal(store.operations.length, 1);
+  await app.close();
+});
+
 test("sync rejects payloads that clients cannot replay before store access", async () => {
   const malformed = [
     {
@@ -210,6 +295,16 @@ test("sync rejects payloads that clients cannot replay before store access", asy
       label: "bean has an unknown field",
       entity: "bean",
       payload: { ...syncEntityFixtures.bean, unknown: true },
+    },
+    {
+      label: "bag has zero starting weight",
+      entity: "bean",
+      payload: { ...coffeeBagPayload, startingWeightGrams: 0 },
+    },
+    {
+      label: "bag has an invalid Coffee ID",
+      entity: "bean",
+      payload: { ...coffeeBagPayload, coffeeId: "coffee-1" },
     },
     {
       label: "machine has an invalid capability",

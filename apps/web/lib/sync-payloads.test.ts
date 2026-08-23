@@ -2,8 +2,13 @@ import "fake-indexeddb/auto";
 
 import Dexie from "dexie";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyRemoteOperation, db, saveBean } from "./db";
-import type { Bean, Brew, Grinder, Machine } from "./models";
+import {
+  applyRemoteOperation,
+  db,
+  saveBean,
+  saveCoffeeWithBag,
+} from "./db";
+import type { Bean, Brew, Coffee, CoffeeBag, Grinder, Machine } from "./models";
 import { parseRemotePayload } from "./sync-payloads";
 import { syncEntityFixtures } from "../../../test-fixtures/sync-entities";
 
@@ -16,17 +21,53 @@ const ids = {
   grinder: "0198d3a4-1111-7000-8000-000000000112",
   brew: "0198d3a4-1111-7000-8000-000000000113",
   envelope: "0198d3a4-1111-7000-8000-000000000114",
+  coffee: "0198d3a4-1111-7000-8000-000000000116",
+  bag: "0198d3a4-1111-7000-8000-000000000117",
+  secondBag: "0198d3a4-1111-7000-8000-000000000118",
 } as const;
 
 const createdAt = "2026-08-22T12:00:00.000Z";
 
-function bean(id = ids.bean): Bean {
+function legacyBean(id: string = ids.bean): Bean {
   return {
     id,
     name: "Hualalai Kona",
     roaster: "Coffee Purveyors",
     origin: "Kona, Hawaii",
     roastLevel: "medium",
+    createdAt,
+  };
+}
+
+function coffee(id: string = ids.coffee): Coffee {
+  return {
+    id,
+    name: "Hualalai Kona",
+    roaster: "Coffee Purveyors",
+    originCountry: "United States",
+    originRegion: "Kona, Hawaii",
+    producer: "Kona Hills Estate",
+    process: "Washed",
+    varietal: "Typica",
+    elevationMeters: 610,
+    roastLevel: "medium-light",
+    notes: "Milk chocolate and orange",
+    createdAt,
+  };
+}
+
+function bag(
+  id: string = ids.bag,
+  coffeeId: string = ids.coffee,
+): CoffeeBag {
+  return {
+    id,
+    coffeeId,
+    roastedOn: "2026-08-15",
+    purchasedOn: "2026-08-18",
+    openedOn: "2026-08-22",
+    startingWeightGrams: 340,
+    notes: "First bag",
     createdAt,
   };
 }
@@ -111,14 +152,20 @@ describe("parseRemotePayload", () => {
   it.each(Object.entries(syncEntityFixtures))(
     "accepts the shared valid %s contract fixture",
     (entity, payload) => {
-      expect(parseRemotePayload(entity, payload)).toMatchObject({
-        id: payload.id,
-      });
+      const parsed = parseRemotePayload(entity, payload);
+      expect(parsed).toMatchObject(
+        entity === "bean"
+          ? {
+              kind: "legacy-bean",
+              coffee: { id: payload.id },
+              bag: { id: payload.id, coffeeId: payload.id },
+            }
+          : { id: payload.id },
+      );
     },
   );
 
   it.each([
-    ["bean", bean()],
     ["machine", machine()],
     ["grinder", grinder()],
     ["brew", brew()],
@@ -128,11 +175,24 @@ describe("parseRemotePayload", () => {
     });
   });
 
+  it("parses current Coffee and bag payloads and normalizes a legacy bean", () => {
+    expect(parseRemotePayload("coffee", coffee())).toEqual(coffee());
+    expect(parseRemotePayload("bean", bag())).toEqual(bag());
+    expect(parseRemotePayload("bean", legacyBean())).toMatchObject({
+      kind: "legacy-bean",
+      coffee: expect.objectContaining({ id: ids.bean }),
+      bag: expect.objectContaining({ id: ids.bean, coffeeId: ids.bean }),
+    });
+  });
+
   it("rejects missing and malformed required fields", () => {
-    const { name: _name, ...missingName } = bean();
+    const { name: _name, ...missingName } = legacyBean();
     expect(() => parseRemotePayload("bean", missingName)).toThrow();
     expect(() =>
-      parseRemotePayload("bean", { ...bean(), id: "not-a-valid-id" }),
+      parseRemotePayload("bean", {
+        ...legacyBean(),
+        id: "not-a-valid-id",
+      }),
     ).toThrow("UUIDv7");
     expect(() =>
       parseRemotePayload("machine", {
@@ -177,6 +237,164 @@ describe("parseRemotePayload", () => {
 });
 
 describe("applyRemoteOperation", () => {
+  it("replays current Coffee and bag upserts into their own tables", async () => {
+    await applyRemoteOperation(alice, {
+      entity: "coffee",
+      entityId: ids.coffee,
+      action: "upsert",
+      payload: coffee(),
+    });
+    await applyRemoteOperation(alice, {
+      entity: "bean",
+      entityId: ids.bag,
+      action: "upsert",
+      payload: bag(),
+    });
+
+    expect(await db.coffees.get([alice, ids.coffee])).toEqual({
+      ...coffee(),
+      ownerId: alice,
+    });
+    expect(await db.bags.get([alice, ids.bag])).toEqual({
+      ...bag(),
+      ownerId: alice,
+    });
+  });
+
+  it("replays a legacy bean upsert into one Coffee and one bag idempotently", async () => {
+    const remote = {
+      entity: "bean",
+      entityId: ids.bean,
+      action: "upsert" as const,
+      payload: legacyBean(),
+    };
+
+    await applyRemoteOperation(alice, remote);
+    await applyRemoteOperation(alice, remote);
+
+    expect(await db.coffees.where("ownerId").equals(alice).toArray()).toEqual([
+      expect.objectContaining({ id: ids.bean, name: legacyBean().name }),
+    ]);
+    expect(await db.bags.where("ownerId").equals(alice).toArray()).toEqual([
+      expect.objectContaining({ id: ids.bean, coffeeId: ids.bean }),
+    ]);
+  });
+
+  it("replays an already normalized legacy pull payload", async () => {
+    const normalized = parseRemotePayload("bean", legacyBean());
+
+    await applyRemoteOperation(alice, {
+      entity: "bean",
+      entityId: ids.bean,
+      action: "upsert",
+      payload: normalized,
+    });
+
+    expect(await db.coffees.get([alice, ids.bean])).toMatchObject({
+      id: ids.bean,
+    });
+    expect(await db.bags.get([alice, ids.bean])).toMatchObject({
+      id: ids.bean,
+      coffeeId: ids.bean,
+    });
+  });
+
+  it("does not replay a legacy bean over pending Coffee work", async () => {
+    const localCoffee = { ...coffee(ids.bean), name: "Local current Coffee" };
+    const localBag = {
+      ...bag(ids.bean, ids.bean),
+      notes: "Local current bag",
+    };
+    await saveCoffeeWithBag(alice, localCoffee, localBag);
+    const bagOperation = await db.operations
+      .where("ownerId")
+      .equals(alice)
+      .filter((pending) => pending.entity === "bean")
+      .first();
+
+    await applyRemoteOperation(
+      alice,
+      {
+        entity: "bean",
+        entityId: ids.bean,
+        action: "upsert",
+        payload: legacyBean(),
+      },
+      [bagOperation!.operationId],
+    );
+
+    expect(await db.coffees.get([alice, ids.bean])).toMatchObject({
+      name: "Local current Coffee",
+    });
+    expect(await db.bags.get([alice, ids.bean])).toMatchObject({
+      notes: "Local current bag",
+    });
+  });
+
+  it.each([
+    ["current bag", { ...bag(), startingWeightGrams: 0 }],
+    ["legacy bean", { ...legacyBean(), name: "" }],
+  ] as const)("does not write a malformed %s payload", async (_label, payload) => {
+    await expect(
+      applyRemoteOperation(alice, {
+        entity: "bean",
+        entityId: payload.id,
+        action: "upsert",
+        payload,
+      }),
+    ).rejects.toThrow();
+
+    expect(await db.coffees.where("ownerId").equals(alice).count()).toBe(0);
+    expect(await db.bags.where("ownerId").equals(alice).count()).toBe(0);
+  });
+
+  it("deletes a legacy pair when no other bag references its Coffee", async () => {
+    await applyRemoteOperation(alice, {
+      entity: "bean",
+      entityId: ids.bean,
+      action: "upsert",
+      payload: legacyBean(),
+    });
+
+    await applyRemoteOperation(alice, {
+      entity: "bean",
+      entityId: ids.bean,
+      action: "delete",
+    });
+
+    expect(await db.coffees.get([alice, ids.bean])).toBeUndefined();
+    expect(await db.bags.get([alice, ids.bean])).toBeUndefined();
+  });
+
+  it("keeps a legacy Coffee on delete while another bag references it", async () => {
+    await applyRemoteOperation(alice, {
+      entity: "bean",
+      entityId: ids.bean,
+      action: "upsert",
+      payload: legacyBean(),
+    });
+    await applyRemoteOperation(alice, {
+      entity: "bean",
+      entityId: ids.secondBag,
+      action: "upsert",
+      payload: bag(ids.secondBag, ids.bean),
+    });
+
+    await applyRemoteOperation(alice, {
+      entity: "bean",
+      entityId: ids.bean,
+      action: "delete",
+    });
+
+    expect(await db.coffees.get([alice, ids.bean])).toMatchObject({
+      id: ids.bean,
+    });
+    expect(await db.bags.get([alice, ids.bean])).toBeUndefined();
+    expect(await db.bags.get([alice, ids.secondBag])).toMatchObject({
+      coffeeId: ids.bean,
+    });
+  });
+
   it("ignores supplied owner and stamps remote brews as synced", async () => {
     await applyRemoteOperation(alice, {
       entity: "brew",
@@ -201,7 +419,7 @@ describe("applyRemoteOperation", () => {
         entity: "bean",
         entityId: ids.envelope,
         action: "upsert",
-        payload: bean(ids.bean),
+        payload: legacyBean(ids.bean),
       }),
     ).rejects.toThrow("does not match envelope");
 
@@ -217,7 +435,7 @@ describe("applyRemoteOperation", () => {
         entity: "bean",
         entityId: ids.bean,
         action: "upsert",
-        payload: { ...bean(), roastLevel: "charcoal" },
+        payload: { ...legacyBean(), roastLevel: "charcoal" },
       }),
     ).rejects.toThrow();
 
@@ -225,7 +443,7 @@ describe("applyRemoteOperation", () => {
   });
 
   it("does not delete another owner's entity with the same ID", async () => {
-    await saveBean(bob, bean());
+    await saveBean(bob, legacyBean());
 
     await applyRemoteOperation(alice, {
       entity: "bean",

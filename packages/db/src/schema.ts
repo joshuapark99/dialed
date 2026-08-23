@@ -37,6 +37,7 @@ export const syncEntity = pgEnum("sync_entity", [
   "brew",
   "taste",
   "recommendation",
+  "coffee",
 ]);
 export const syncAction = pgEnum("sync_action", ["upsert", "delete"]);
 

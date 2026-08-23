@@ -13,9 +13,11 @@ import type {
 } from "./models";
 import { ANONYMOUS_OWNER_ID } from "./models";
 import {
+  parseLegacyBeanRemotePayload,
   parseRemoteEntity,
   parseRemotePayload,
   RemoteEntityIdSchema,
+  type LegacyBeanRemotePayload,
   type RemotePayload,
 } from "./sync-payloads";
 
@@ -714,7 +716,22 @@ interface PreparedRemoteOperation {
 }
 
 type OwnerScopedRecord =
-  Owned<CoffeeBag> | Owned<Machine> | Owned<Grinder> | Owned<Brew>;
+  | Owned<Coffee>
+  | Owned<CoffeeBag>
+  | Owned<Machine>
+  | Owned<Grinder>
+  | Owned<Brew>;
+
+function isLegacyBeanPayload(
+  payload: unknown,
+): payload is LegacyBeanRemotePayload {
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    "kind" in payload &&
+    payload.kind === "legacy-bean"
+  );
+}
 
 function prepareRemoteOperation(
   remote: RemoteOperation,
@@ -726,10 +743,15 @@ function prepareRemoteOperation(
     if (remote.payload == null) {
       throw new Error("Remote upsert payload is required");
     }
-    payload = parseRemotePayload(entity, remote.payload);
-    if (payload.id !== entityId) {
+    payload = isLegacyBeanPayload(remote.payload)
+      ? parseLegacyBeanRemotePayload(remote.payload)
+      : parseRemotePayload(entity, remote.payload);
+    const payloadId = isLegacyBeanPayload(payload)
+      ? payload.bag.id
+      : payload.id;
+    if (payloadId !== entityId) {
       throw new Error(
-        `Payload ID ${payload.id} does not match envelope ID ${entityId}`,
+        `Payload ID ${payloadId} does not match envelope ID ${entityId}`,
       );
     }
   }
@@ -741,14 +763,35 @@ function tableForEntity(
   entity: SyncEntity,
 ): Table<OwnerScopedRecord, OwnerScopedKey> {
   const table =
-    entity === "bean"
-      ? db.bags
+    entity === "coffee"
+      ? db.coffees
+      : entity === "bean"
+        ? db.bags
       : entity === "machine"
         ? db.machines
         : entity === "grinder"
           ? db.grinders
           : db.brews;
   return table as unknown as Table<OwnerScopedRecord, OwnerScopedKey>;
+}
+
+async function hasPendingLocalOperation(
+  ownerId: string,
+  entity: SyncEntity,
+  entityId: string,
+  ignoredPendingIds: ReadonlySet<string>,
+): Promise<boolean> {
+  const pending = await db.operations
+    .where("ownerId")
+    .equals(ownerId)
+    .filter(
+      (candidate) =>
+        candidate.entity === entity &&
+        candidate.entityId === entityId &&
+        !ignoredPendingIds.has(candidate.operationId),
+    )
+    .first();
+  return pending !== undefined;
 }
 
 async function applyPreparedRemoteOperation(
@@ -759,27 +802,48 @@ async function applyPreparedRemoteOperation(
   const table = tableForEntity(remote.entity);
   const key = ownerKey(ownerId, remote.entityId);
   const current = await table.get(key);
-  const hasPendingLocalOperation = await db.operations
-    .where("ownerId")
-    .equals(ownerId)
-    .filter(
-      (pending) =>
-        pending.entity === remote.entity &&
-        pending.entityId === remote.entityId &&
-        !ignoredPendingIds.has(pending.operationId),
-    )
-    .first();
-  if (hasPendingLocalOperation) return;
+  const hasPendingEntityOperation = await hasPendingLocalOperation(
+    ownerId,
+    remote.entity,
+    remote.entityId,
+    ignoredPendingIds,
+  );
+  if (hasPendingEntityOperation) return;
 
   if (remote.action === "delete") {
-    if (current) await table.delete(key);
+    if (!current) return;
+    await table.delete(key);
+    if (remote.entity !== "bean") return;
+
+    const deletedBag = current as Owned<CoffeeBag>;
+    if (deletedBag.coffeeId !== remote.entityId) return;
+    const hasPendingCoffeeOperation = await hasPendingLocalOperation(
+      ownerId,
+      "coffee",
+      deletedBag.coffeeId,
+      ignoredPendingIds,
+    );
+    if (hasPendingCoffeeOperation) return;
+    const otherBag = await db.bags
+      .where("[ownerId+coffeeId]")
+      .equals([ownerId, deletedBag.coffeeId])
+      .first();
+    if (!otherBag) {
+      await db.coffees.delete(ownerKey(ownerId, deletedBag.coffeeId));
+    }
     return;
   }
 
-  if (remote.entity === "bean") {
-    const legacyBean = remote.payload as Bean;
-    await db.coffees.put({ ...coffeeFromLegacyBean(legacyBean), ownerId });
-    await db.bags.put({ ...bagFromLegacyBean(legacyBean), ownerId });
+  if (remote.entity === "bean" && isLegacyBeanPayload(remote.payload)) {
+    const hasPendingCoffeeOperation = await hasPendingLocalOperation(
+      ownerId,
+      "coffee",
+      remote.payload.coffee.id,
+      ignoredPendingIds,
+    );
+    if (hasPendingCoffeeOperation) return;
+    await db.coffees.put({ ...remote.payload.coffee, ownerId });
+    await db.bags.put({ ...remote.payload.bag, ownerId });
     return;
   }
 
