@@ -53,11 +53,13 @@
 ### Task 1: Canonical Coffee and CoffeeBag Contracts
 
 **Files:**
+
 - Modify: `packages/domain/src/schemas.ts`
 - Modify: `packages/domain/src/domain.test.ts`
 - Modify: `apps/web/lib/models.ts`
 
 **Interfaces:**
+
 - Produces: `CoffeeSchema`, `CoffeeBagSchema`, `Coffee`, `CoffeeBag`, and web `SyncEntity = "coffee" | "bean" | "machine" | "grinder" | "brew"`.
 - Produces: `CoffeeBag.id` as the value persisted in `Brew.beanId`.
 
@@ -104,11 +106,15 @@ it("validates reusable coffee details and a physical bag", () => {
 });
 
 it.each([0, -1, 9001])("rejects invalid coffee elevation %s", (value) => {
-  expect(() => CoffeeSchema.parse({ ...validCoffee, elevationMeters: value })).toThrow();
+  expect(() =>
+    CoffeeSchema.parse({ ...validCoffee, elevationMeters: value }),
+  ).toThrow();
 });
 
 it.each([0, -1])("rejects invalid starting bag weight %s", (value) => {
-  expect(() => CoffeeBagSchema.parse({ ...validBag, startingWeightGrams: value })).toThrow();
+  expect(() =>
+    CoffeeBagSchema.parse({ ...validBag, startingWeightGrams: value }),
+  ).toThrow();
 });
 ```
 
@@ -123,29 +129,33 @@ Expected: FAIL because `CoffeeSchema` and `CoffeeBagSchema` do not exist.
 In `packages/domain/src/schemas.ts`, replace the old Coffee-as-Bean contract with separate schemas while leaving brew `beanId` unchanged:
 
 ```ts
-export const CoffeeSchema = z.object({
-  ...entityFields,
-  name: z.string().trim().min(1).max(120),
-  roaster: z.string().trim().min(1).max(120),
-  originCountry: z.string().trim().min(1).max(120).optional(),
-  originRegion: z.string().trim().min(1).max(120).optional(),
-  producer: z.string().trim().min(1).max(240).optional(),
-  process: z.string().trim().min(1).max(120).optional(),
-  varietal: z.string().trim().min(1).max(240).optional(),
-  elevationMeters: z.number().finite().int().min(1).max(9000).optional(),
-  roastLevel: RoastLevelSchema.default("unknown"),
-  notes: optionalText,
-}).strict();
+export const CoffeeSchema = z
+  .object({
+    ...entityFields,
+    name: z.string().trim().min(1).max(120),
+    roaster: z.string().trim().min(1).max(120),
+    originCountry: z.string().trim().min(1).max(120).optional(),
+    originRegion: z.string().trim().min(1).max(120).optional(),
+    producer: z.string().trim().min(1).max(240).optional(),
+    process: z.string().trim().min(1).max(120).optional(),
+    varietal: z.string().trim().min(1).max(240).optional(),
+    elevationMeters: z.number().finite().int().min(1).max(9000).optional(),
+    roastLevel: RoastLevelSchema.default("unknown"),
+    notes: optionalText,
+  })
+  .strict();
 
-export const CoffeeBagSchema = z.object({
-  ...entityFields,
-  coffeeId: EntityIdSchema,
-  roastedOn: z.string().date().optional(),
-  purchasedOn: z.string().date().optional(),
-  openedOn: z.string().date().optional(),
-  startingWeightGrams: positiveMeasurement.max(100_000).optional(),
-  notes: optionalText,
-}).strict();
+export const CoffeeBagSchema = z
+  .object({
+    ...entityFields,
+    coffeeId: EntityIdSchema,
+    roastedOn: z.string().date().optional(),
+    purchasedOn: z.string().date().optional(),
+    openedOn: z.string().date().optional(),
+    startingWeightGrams: positiveMeasurement.max(100_000).optional(),
+    notes: optionalText,
+  })
+  .strict();
 
 export type Coffee = z.infer<typeof CoffeeSchema>;
 export type CoffeeBag = z.infer<typeof CoffeeBagSchema>;
@@ -171,10 +181,12 @@ git commit -m "feat: define coffee and bag contracts"
 ### Task 2: IndexedDB Migration and Atomic Persistence
 
 **Files:**
+
 - Modify: `apps/web/lib/db.ts`
 - Modify: `apps/web/lib/db.test.ts`
 
 **Interfaces:**
+
 - Consumes: `Coffee`, `CoffeeBag`, and `SyncEntity` from Task 1.
 - Produces: `db.coffees`, `db.bags`, `getCoffees(ownerId)`, `getCoffeeBags(ownerId)`, `saveCoffeeWithBag(ownerId, coffee, bag)`, and `saveCoffeeBag(ownerId, bag)`.
 - Produces: version-6 legacy migration where Coffee ID = bag ID = legacy Bean ID.
@@ -234,8 +246,12 @@ Until Task 5 migrates every view, keep explicit deprecated adapters so each inte
 Add exact APIs:
 
 ```ts
-export async function getCoffees(ownerId: string): Promise<Array<Owned<Coffee>>>;
-export async function getCoffeeBags(ownerId: string): Promise<Array<Owned<CoffeeBag>>>;
+export async function getCoffees(
+  ownerId: string,
+): Promise<Array<Owned<Coffee>>>;
+export async function getCoffeeBags(
+  ownerId: string,
+): Promise<Array<Owned<CoffeeBag>>>;
 export async function saveCoffeeWithBag(
   ownerId: string,
   coffee: Coffee,
@@ -265,6 +281,7 @@ git commit -m "feat: persist coffees and physical bags"
 ### Task 3: Backward-Compatible Sync and API Validation
 
 **Files:**
+
 - Modify: `apps/web/lib/sync-payloads.ts`
 - Modify: `apps/web/lib/sync-payloads.test.ts`
 - Modify: `apps/web/lib/db.ts`
@@ -275,6 +292,7 @@ git commit -m "feat: persist coffees and physical bags"
 - Modify: `packages/db/migrations/meta/_journal.json`
 
 **Interfaces:**
+
 - Consumes: Task 2 Coffee/bag tables.
 - Produces: `parseRemotePayload` support for `coffee`, current `bean` (bag), and `legacy-bean` normalization.
 - Produces: API acceptance of the new entity without a new endpoint.
@@ -310,31 +328,35 @@ Expected: FAIL on unsupported `coffee` and the new bag payload.
 Use a strict legacy/current union for `bean`. Return a discriminated legacy result so `applyRemoteOperation` can atomically route one old upsert to both `db.coffees` and `db.bags`. Current wire shapes are:
 
 ```ts
-const CoffeePayloadSchema = z.object({
-  id: RemoteEntityIdSchema,
-  name: RequiredTextSchema,
-  roaster: RequiredTextSchema,
-  originCountry: RequiredTextSchema.optional(),
-  originRegion: RequiredTextSchema.optional(),
-  producer: RequiredTextSchema.optional(),
-  process: RequiredTextSchema.optional(),
-  varietal: RequiredTextSchema.optional(),
-  elevationMeters: z.number().int().min(1).max(9000).optional(),
-  roastLevel: RoastLevelPayloadSchema,
-  notes: OptionalTextSchema,
-  createdAt: TimestampSchema,
-}).strict();
+const CoffeePayloadSchema = z
+  .object({
+    id: RemoteEntityIdSchema,
+    name: RequiredTextSchema,
+    roaster: RequiredTextSchema,
+    originCountry: RequiredTextSchema.optional(),
+    originRegion: RequiredTextSchema.optional(),
+    producer: RequiredTextSchema.optional(),
+    process: RequiredTextSchema.optional(),
+    varietal: RequiredTextSchema.optional(),
+    elevationMeters: z.number().int().min(1).max(9000).optional(),
+    roastLevel: RoastLevelPayloadSchema,
+    notes: OptionalTextSchema,
+    createdAt: TimestampSchema,
+  })
+  .strict();
 
-const CoffeeBagPayloadSchema = z.object({
-  id: RemoteEntityIdSchema,
-  coffeeId: RemoteEntityIdSchema,
-  roastedOn: z.string().date().optional(),
-  purchasedOn: z.string().date().optional(),
-  openedOn: z.string().date().optional(),
-  startingWeightGrams: z.number().finite().positive().max(100_000).optional(),
-  notes: OptionalTextSchema,
-  createdAt: TimestampSchema,
-}).strict();
+const CoffeeBagPayloadSchema = z
+  .object({
+    id: RemoteEntityIdSchema,
+    coffeeId: RemoteEntityIdSchema,
+    roastedOn: z.string().date().optional(),
+    purchasedOn: z.string().date().optional(),
+    openedOn: z.string().date().optional(),
+    startingWeightGrams: z.number().finite().positive().max(100_000).optional(),
+    notes: OptionalTextSchema,
+    createdAt: TimestampSchema,
+  })
+  .strict();
 ```
 
 For a legacy delete, delete the bag; delete the paired Coffee only when no other local bag references it. Preserve pending-local-operation conflict rules for both entity types.
@@ -367,6 +389,7 @@ git commit -m "feat: sync coffees and bags compatibly"
 ### Task 4: Coffee Form Parsing and Grouped Setup UI
 
 **Files:**
+
 - Create: `apps/web/lib/coffee-form.ts`
 - Create: `apps/web/lib/coffee-form.test.ts`
 - Create: `apps/web/components/coffee-dialog.tsx`
@@ -374,6 +397,7 @@ git commit -m "feat: sync coffees and bags compatibly"
 - Modify: `apps/web/components/onboarding.tsx`
 
 **Interfaces:**
+
 - Consumes: `saveCoffeeWithBag`, `saveCoffeeBag`, `Coffee`, and `CoffeeBag`.
 - Produces: `parseCoffeeForm`, `parseBagForm`, `formatBagLabel`, `CoffeeLibrary`, and `CoffeeDialog`.
 
@@ -382,15 +406,17 @@ git commit -m "feat: sync coffees and bags compatibly"
 Create `coffee-form.test.ts` with required-field, blank-optional, numeric-bound, and date-label cases:
 
 ```ts
-expect(parseCoffeeForm({ ...validCoffeeDraft, elevationMeters: "700" })).toEqual(
-  expect.objectContaining({ elevationMeters: 700 }),
-);
+expect(
+  parseCoffeeForm({ ...validCoffeeDraft, elevationMeters: "700" }),
+).toEqual(expect.objectContaining({ elevationMeters: 700 }));
 expect(parseCoffeeForm({ ...validCoffeeDraft, name: "" }).valid).toBe(false);
 expect(parseBagForm({ ...blankBagDraft, startingWeightGrams: "" })).toEqual({
   valid: true,
   value: {},
 });
-expect(parseBagForm({ ...blankBagDraft, startingWeightGrams: "0" }).valid).toBe(false);
+expect(parseBagForm({ ...blankBagDraft, startingWeightGrams: "0" }).valid).toBe(
+  false,
+);
 expect(formatBagLabel({ ...bag, roastedOn: "2026-08-12" }, "en-US")).toBe(
   "Roasted Aug 12, 2026",
 );
@@ -409,11 +435,14 @@ Define draft interfaces with string inputs, normalize blank optional strings to 
 
 ```ts
 export type FormParseResult<T> =
-  | { valid: true; value: T }
-  | { valid: false; field: string; message: string };
+  { valid: true; value: T } | { valid: false; field: string; message: string };
 
-export function parseCoffeeForm(draft: CoffeeFormDraft): FormParseResult<CoffeeFormValue>;
-export function parseBagForm(draft: BagFormDraft): FormParseResult<BagFormValue>;
+export function parseCoffeeForm(
+  draft: CoffeeFormDraft,
+): FormParseResult<CoffeeFormValue>;
+export function parseBagForm(
+  draft: BagFormDraft,
+): FormParseResult<BagFormValue>;
 export function formatBagLabel(bag: CoffeeBag, locale?: string): string;
 ```
 
@@ -459,6 +488,7 @@ git commit -m "feat: add coffees and repeat bags"
 ### Task 5: Brew Views and Exports
 
 **Files:**
+
 - Modify: `apps/web/components/dialed-app.tsx`
 - Modify: `apps/web/components/brew-log.tsx`
 - Modify: `apps/web/components/home-view.tsx`
@@ -469,6 +499,7 @@ git commit -m "feat: add coffees and repeat bags"
 - Modify: `apps/web/components/setup-view.tsx`
 
 **Interfaces:**
+
 - Consumes: owner-scoped Coffee/bag reads and `formatBagLabel`.
 - Produces: `buildJsonExport`, `buildBrewCsv`, and Coffee/bag-aware view props.
 
@@ -477,7 +508,9 @@ git commit -m "feat: add coffees and repeat bags"
 Create `export.test.ts` asserting owner-filtered inputs serialize separate collections and CSV adds stable columns:
 
 ```ts
-expect(JSON.parse(buildJsonExport({ coffees, bags, machines, grinders, brews }))).toEqual({
+expect(
+  JSON.parse(buildJsonExport({ coffees, bags, machines, grinders, brews })),
+).toEqual({
   coffees,
   bags,
   machines,
@@ -503,7 +536,9 @@ Add:
 
 ```ts
 export function buildJsonExport(data: ExportData): string;
-export function buildBrewCsv(data: Pick<ExportData, "coffees" | "bags" | "brews">): string;
+export function buildBrewCsv(
+  data: Pick<ExportData, "coffees" | "bags" | "brews">,
+): string;
 ```
 
 Resolve each brew `beanId` to a bag and then its Coffee. Keep CSV escaping in this module and remove `toCsv` from `setup-view.tsx`.
@@ -538,11 +573,13 @@ git commit -m "feat: show bag-specific brew history"
 ### Task 6: Browser Coverage and Full Verification
 
 **Files:**
+
 - Modify: `e2e/app.spec.ts`
 - Modify: `README.md`
 - Modify: `docs/implementation-tickets.md`
 
 **Interfaces:**
+
 - Consumes: complete Coffee/bag flow from Tasks 1–5.
 - Produces: release-level regression proof and updated product documentation.
 
@@ -553,7 +590,9 @@ Add a Playwright test that completes onboarding with roast date `2026-08-01`, op
 ```ts
 await expect(page.getByText("Roasted Aug 1, 2026")).toBeVisible();
 await expect(page.getByText("Roasted Aug 15, 2026")).toBeVisible();
-await expect(page.getByRole("option", { name: /Hualalai Kona.*Aug 15/ })).toBeVisible();
+await expect(
+  page.getByRole("option", { name: /Hualalai Kona.*Aug 15/ }),
+).toBeVisible();
 await expect(page.getByText(/Hualalai Kona.*Aug 15/)).toBeVisible();
 ```
 

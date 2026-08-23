@@ -73,8 +73,10 @@ describe("CoffeeDialog", () => {
     expect(markup).toContain('name="originCountry"');
     expect(markup).toContain('name="startingWeightGrams"');
     expect(markup).toContain("<dialog");
+    expect(markup).toContain('role="dialog"');
+    expect(markup).toContain('aria-labelledby="coffee-dialog-coffee-title"');
     expect(markup).not.toContain('role="alert"');
-    expect(markup).not.toContain("autofocus");
+    expect(markup).toContain("autofocus");
     expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>[^<]*Save coffee/);
   });
 
@@ -88,7 +90,8 @@ describe("CoffeeDialog", () => {
       />,
     );
 
-    expect(markup).toContain("Add Another Bag");
+    expect(markup).toContain("Add another bag");
+    expect(markup).toContain('aria-labelledby="coffee-dialog-bag-title"');
     expect(markup).toContain("Hualalai Kona");
     expect(markup).toContain('name="roastedOn"');
     expect(markup).not.toContain('name="originCountry"');
@@ -144,8 +147,8 @@ describe("CoffeeLibrary", () => {
       <CoffeeLibrary ownerId="anonymous" coffees={coffees} bags={bags} />,
     );
 
-    expect(markup).toContain("Add Coffee");
-    expect(markup.match(/Add Another Bag/g)).toHaveLength(2);
+    expect(markup).toContain("Add coffee");
+    expect(markup.match(/Add another bag/g)).toHaveLength(2);
     expect(markup.indexOf("Hualalai Kona")).toBeLessThan(
       markup.indexOf("Suke Quto"),
     );

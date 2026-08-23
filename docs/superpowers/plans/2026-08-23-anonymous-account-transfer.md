@@ -44,10 +44,12 @@
 ### Task 1: Transfer Summary, Graph Validation, and Journal Types
 
 **Files:**
+
 - Create: `apps/web/lib/anonymous-transfer.ts`
 - Create: `apps/web/lib/anonymous-transfer.test.ts`
 
 **Interfaces:**
+
 - Consumes: `ANONYMOUS_OWNER_ID`, `db.coffees`, `db.bags`, `db.machines`, `db.grinders`, `db.brews`, `db.operations`, and owner preferences from the Coffee/bag plan.
 - Produces: `AnonymousTransferSummary`, `AnonymousTransferJournal`, `AnonymousTransferConflictError`, `AnonymousTransferValidationError`, `getAnonymousTransferSummary`, and `getAnonymousTransferOffer`.
 
@@ -137,12 +139,14 @@ git commit -m "feat: discover transferable local data"
 ### Task 2: Atomic Staging, Conflict Detection, and Safe Cleanup
 
 **Files:**
+
 - Modify: `apps/web/lib/anonymous-transfer.ts`
 - Modify: `apps/web/lib/anonymous-transfer.test.ts`
 - Modify: `apps/web/lib/db.ts`
 - Modify: `apps/web/lib/db.test.ts`
 
 **Interfaces:**
+
 - Consumes: Task 1 validated snapshot.
 - Produces: `stageAnonymousTransfer`, `completeAnonymousTransfer`, `deferAnonymousTransfer`, and `OwnerTransferInProgressError`.
 
@@ -221,7 +225,9 @@ Export `OwnerTransferInProgressError` from `db.ts` and make `assertOwnerWritable
 export async function completeAnonymousTransfer(
   destinationOwnerId: string,
 ): Promise<{ completed: boolean; pendingCount: number }>;
-export async function deferAnonymousTransfer(destinationOwnerId: string): Promise<void>;
+export async function deferAnonymousTransfer(
+  destinationOwnerId: string,
+): Promise<void>;
 ```
 
 Extend `acknowledgeOperations` in `db.ts` so its existing transaction also reads the destination journal, appends the intersection of acknowledged IDs to `acknowledgedOperationIds`, and only then deletes those pending operations. This makes acknowledgement evidence crash-safe and prevents an unrelated local deletion from masquerading as cloud acknowledgement.
@@ -244,10 +250,12 @@ git commit -m "feat: stage local account transfers safely"
 ### Task 3: Sync-Coordinated Transfer Orchestration
 
 **Files:**
+
 - Modify: `apps/web/lib/sync.ts`
 - Modify: `apps/web/lib/sync.test.ts`
 
 **Interfaces:**
+
 - Consumes: `stageAnonymousTransfer` and `completeAnonymousTransfer` from Task 2.
 - Produces: `moveAnonymousDataToAccount(ownerId)` and coordinator `transferAnonymous(ownerId, stage, complete)`.
 
@@ -344,6 +352,7 @@ git commit -m "feat: coordinate local transfer with account sync"
 ### Task 4: Transfer Offer, Deferred Settings Action, and Onboarding Gate
 
 **Files:**
+
 - Create: `apps/web/components/local-data-transfer-dialog.tsx`
 - Modify: `apps/web/components/dialed-app.tsx`
 - Modify: `apps/web/components/setup-view.tsx`
@@ -351,6 +360,7 @@ git commit -m "feat: coordinate local transfer with account sync"
 - Modify: `apps/web/lib/onboarding-state.test.ts`
 
 **Interfaces:**
+
 - Consumes: `getAnonymousTransferOffer`, `getAnonymousTransferSummary`, `deferAnonymousTransfer`, and `moveAnonymousDataToAccount`.
 - Produces: `LocalDataTransferDialog` and initial-account state that resolves sync/offer before onboarding.
 
@@ -405,7 +415,11 @@ type AccountInitialization =
   | { status: "checking-transfer" }
   | { status: "offering"; summary: AnonymousTransferSummary }
   | { status: "ready" }
-  | { status: "transfer-error"; summary: AnonymousTransferSummary; message: string };
+  | {
+      status: "transfer-error";
+      summary: AnonymousTransferSummary;
+      message: string;
+    };
 ```
 
 After owner-scoped local tables load, run initial destination sync. Only after it succeeds, call `getAnonymousTransferOffer`. Render the dialog before the onboarding branch. **Move data** calls `moveAnonymousDataToAccount`, refreshes live queries, and enters ready only after `{ completed: true }`. **Not now** calls `deferAnonymousTransfer` and enters ready without touching anonymous data. Existing authentication/account mismatch handling remains authoritative.
@@ -434,11 +448,13 @@ git commit -m "feat: ask before moving local account data"
 ### Task 5: Browser Failure/Recovery Coverage and Full Verification
 
 **Files:**
+
 - Modify: `e2e/app.spec.ts`
 - Modify: `README.md`
 - Modify: `docs/implementation-tickets.md`
 
 **Interfaces:**
+
 - Consumes: completed transfer store, coordinator, and UI.
 - Produces: end-to-end proof that consent, isolation, retry, and deletion timing work together.
 
@@ -451,8 +467,12 @@ In `e2e/app.spec.ts`, add a fixture helper that seeds anonymous Coffee/bag/equip
 Accept path assertions:
 
 ```ts
-await expect(page.getByRole("dialog", { name: /move local data/i })).toBeVisible();
-await expect(page.getByText(/2 shots.*1 coffee.*1 machine.*1 grinder/i)).toBeVisible();
+await expect(
+  page.getByRole("dialog", { name: /move local data/i }),
+).toBeVisible();
+await expect(
+  page.getByText(/2 shots.*1 coffee.*1 machine.*1 grinder/i),
+).toBeVisible();
 await page.getByRole("button", { name: "Move data" }).click();
 await expect(page.getByText("Anonymous coffee")).toBeVisible();
 ```

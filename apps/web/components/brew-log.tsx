@@ -167,7 +167,7 @@ export function BrewLog({
       taste,
       ratio,
       flow,
-      comparisonBrewId: previous?.id,
+      ...(previous ? { comparisonBrewId: previous.id } : {}),
       recommendation: getRecommendation(input, grinder, machine, previous),
       createdAt,
       updatedAt: createdAt,

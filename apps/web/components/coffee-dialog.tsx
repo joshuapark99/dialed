@@ -99,6 +99,7 @@ export function selectVisibleFieldError(
 
 export function CoffeeDialog(props: CoffeeDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const titleId = `coffee-dialog-${props.mode}-title`;
   const [coffeeDraft, setCoffeeDraft] =
     useState<CoffeeFormDraft>(initialCoffeeDraft);
   const [bagDraft, setBagDraft] = useState<BagFormDraft>(initialBagDraft);
@@ -199,8 +200,9 @@ export function CoffeeDialog(props: CoffeeDialogProps) {
   return (
     <dialog
       ref={dialogRef}
+      role="dialog"
       aria-modal="true"
-      aria-labelledby="coffee-dialog-title"
+      aria-labelledby={titleId}
       className="fixed inset-x-0 bottom-0 top-auto z-50 m-0 max-h-[92dvh] w-full max-w-none overflow-y-auto rounded-t-lg border-0 bg-white p-5 text-ink shadow-panel backdrop:bg-ink/35 sm:inset-0 sm:m-auto sm:max-w-2xl sm:rounded-lg"
       onCancel={(event) => handleModalCancel(event, saving, props.onClose)}
     >
@@ -211,8 +213,8 @@ export function CoffeeDialog(props: CoffeeDialogProps) {
           <PackagePlus className="h-5 w-5 text-leaf" />
         )}
         <div>
-          <h2 id="coffee-dialog-title" className="text-lg font-black">
-            {props.mode === "coffee" ? "Add Coffee" : "Add Another Bag"}
+          <h2 id={titleId} className="text-lg font-black">
+            {props.mode === "coffee" ? "Add coffee" : "Add another bag"}
           </h2>
           {props.mode === "bag" && (
             <p className="text-sm text-muted">{props.coffee.name}</p>
@@ -232,6 +234,7 @@ export function CoffeeDialog(props: CoffeeDialogProps) {
                 onChange={(value) => updateCoffee("name", value)}
                 onBlur={() => touch("coffee", "name")}
                 error={errorFor("coffee", "name")}
+                autoFocus={props.mode === "coffee"}
                 required
               />
               <TextField
@@ -345,6 +348,7 @@ export function CoffeeDialog(props: CoffeeDialogProps) {
               onChange={(value) => updateBag("roastedOn", value)}
               onBlur={() => touch("bag", "roastedOn")}
               error={errorFor("bag", "roastedOn")}
+              autoFocus={props.mode === "bag"}
               type="date"
             />
             <TextField
@@ -440,6 +444,7 @@ function TextField({
   min?: string;
   max?: string;
   step?: string;
+  autoFocus?: boolean;
 }) {
   return (
     <label className="mb-4">

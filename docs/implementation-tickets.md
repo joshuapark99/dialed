@@ -64,6 +64,15 @@ Status: Complete
 - Bind sync and account deletion to the UI-resolved account, and commit each validated pull page with its cursor atomically.
 - Retain the validated append-only operation ledger as the authoritative cloud source of truth; normalized PostgreSQL tables are not materialized from ledger payloads.
 
+## DIAL-008: Coffee and bag modeling
+
+Status: Complete
+
+- Model reusable Coffee records separately from individual bags and their roast, purchase, open, weight, and note details.
+- Group repeat bags under their Coffee in Setup and identify the selected bag by roast date while logging and reviewing history.
+- Keep automatic comparisons scoped to the exact bag and carry Coffee/bag identity through local persistence, sync, and exports.
+- Cover onboarding, repeat-bag creation, bag-specific logging, visible history identity, and IndexedDB comparison isolation in Playwright.
+
 ## Later releases
 
 - Pour-over brew method and method-specific coaching.

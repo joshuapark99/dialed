@@ -1,9 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 
-async function completeOnboarding(page: Page) {
+async function completeOnboarding(page: Page, roastedOn?: string) {
   await page.getByLabel("Coffee").fill("Hualalai Kona");
   await page.getByLabel("Roaster").fill("Coffee Purveyors");
+  if (roastedOn) await page.getByLabel("Roast date (optional)").fill(roastedOn);
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByLabel("Machine").fill("Gaggia Classic Pro E24");
   await page.getByRole("button", { name: "Continue" }).click();
@@ -13,6 +14,87 @@ async function completeOnboarding(page: Page) {
     page.getByRole("heading", { name: "Ready for the next shot?" }),
   ).toBeVisible();
 }
+
+test("groups repeat bags and keeps comparisons bag-specific", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await completeOnboarding(page, "2026-08-01");
+
+  await page.getByRole("button", { name: "Setup" }).click();
+  await page
+    .getByRole("button", { name: "Add another bag", exact: true })
+    .click();
+  const bagDialog = page.getByRole("dialog", { name: "Add another bag" });
+  await expect(bagDialog).toBeVisible();
+  const roastDate = bagDialog.getByLabel("Roast date");
+  await expect(roastDate).toBeFocused();
+  await roastDate.fill("2026-08-15");
+  await bagDialog.getByRole("button", { name: "Save bag" }).click();
+
+  await page.getByRole("button", { name: "Log brew", exact: true }).click();
+  const coffeeSelect = page.getByLabel("Coffee");
+  const olderBagId = await page
+    .getByRole("option", { name: /Hualalai Kona.*Aug 1, 2026$/ })
+    .getAttribute("value");
+  expect(olderBagId).not.toBeNull();
+  await coffeeSelect.selectOption(olderBagId!);
+  await page.getByRole("textbox", { name: "Grind", exact: true }).fill("0.8");
+  await page.getByRole("button", { name: "Save and see next move" }).click();
+
+  await page.getByRole("button", { name: "Log the next shot" }).click();
+  // Chromium renders a closed select's native popup outside Playwright's
+  // visibility tree, so expand it before asserting the accessible option.
+  await coffeeSelect.evaluate((select) => {
+    if (select instanceof HTMLSelectElement)
+      select.size = select.options.length;
+  });
+  await expect(
+    page.getByRole("option", { name: /Hualalai Kona.*Aug 15/ }),
+  ).toBeVisible();
+  await page.getByRole("textbox", { name: "Grind", exact: true }).fill("0.9");
+  await page.getByRole("button", { name: "Save and see next move" }).click();
+  await expect(page.getByText(/Hualalai Kona.*Aug 15/)).toBeVisible();
+
+  const secondBrew = await page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("dialed-local");
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result);
+    });
+    const result = await new Promise<Record<string, unknown> | undefined>(
+      (resolve, reject) => {
+        const transaction = database.transaction(
+          ["ownedBeans", "ownedBrews"],
+          "readonly",
+        );
+        const bagsRequest = transaction.objectStore("ownedBeans").getAll();
+        const brewsRequest = transaction.objectStore("ownedBrews").getAll();
+        transaction.oncomplete = () => {
+          const newerBag = (
+            bagsRequest.result as Array<{ id: string; roastedOn?: string }>
+          ).find((bag) => bag.roastedOn === "2026-08-15");
+          resolve(
+            (brewsRequest.result as Array<Record<string, unknown>>).find(
+              (brew) => brew.beanId === newerBag?.id,
+            ),
+          );
+        };
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      },
+    );
+    database.close();
+    return result;
+  });
+  expect(secondBrew).toBeDefined();
+  expect(secondBrew).not.toHaveProperty("comparisonBrewId");
+
+  await page.getByRole("button", { name: "History" }).click();
+  await expect(page.getByText("Roasted Aug 1, 2026")).toBeVisible();
+  await expect(page.getByText("Roasted Aug 15, 2026")).toBeVisible();
+});
 
 test("onboards, logs a shot, and returns one next move on mobile", async ({
   page,
@@ -175,10 +257,12 @@ test("anonymous views and exports exclude another owner's records", async ({
   const contents = JSON.parse(
     await readFile(await download.path(), "utf8"),
   ) as {
-    beans: Array<{ name: string }>;
+    coffees: Array<{ name: string }>;
   };
-  expect(contents.beans.map((bean) => bean.name)).toContain("Hualalai Kona");
-  expect(contents.beans.map((bean) => bean.name)).not.toContain(
+  expect(contents.coffees.map((coffee) => coffee.name)).toContain(
+    "Hualalai Kona",
+  );
+  expect(contents.coffees.map((coffee) => coffee.name)).not.toContain(
     "Foreign owner coffee",
   );
 });

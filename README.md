@@ -2,7 +2,7 @@
 
 Dialed is an offline-first espresso logging and coaching app. Log a shot, score what you tasted, and get one explainable variable to change next.
 
-The first release is intentionally espresso-only. It supports anonymous local use, optional Google-backed cloud sync, beans and equipment profiles, dialed recipes, history comparisons, and JSON/CSV export.
+The first release is intentionally espresso-only. It supports anonymous local use, optional Google-backed cloud sync, reusable Coffee records with per-bag roast dates, equipment profiles, dialed recipes, bag-specific history comparisons, and JSON/CSV export.
 
 ## Repository
 

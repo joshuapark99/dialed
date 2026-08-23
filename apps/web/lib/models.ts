@@ -1,9 +1,6 @@
 export type RoastLevel = "light" | "medium" | "dark";
 export type CoffeeRoastLevel =
-  | RoastLevel
-  | "medium-light"
-  | "medium-dark"
-  | "unknown";
+  RoastLevel | "medium-light" | "medium-dark" | "unknown";
 export type TemperatureControl = "none" | "relative" | "precise";
 
 export const ANONYMOUS_OWNER_ID = "anonymous";

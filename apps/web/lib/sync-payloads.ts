@@ -63,12 +63,7 @@ const CoffeeBagPayloadSchema = z
     roastedOn: z.string().date().optional(),
     purchasedOn: z.string().date().optional(),
     openedOn: z.string().date().optional(),
-    startingWeightGrams: z
-      .number()
-      .finite()
-      .positive()
-      .max(100_000)
-      .optional(),
+    startingWeightGrams: z.number().finite().positive().max(100_000).optional(),
     notes: OptionalTextSchema,
     createdAt: TimestampSchema,
   })
@@ -230,12 +225,7 @@ const payloadSchemas = {
 type RemoteSyncEntity = SyncEntity;
 
 export type RemotePayload =
-  | Coffee
-  | CoffeeBag
-  | LegacyBeanRemotePayload
-  | Machine
-  | Grinder
-  | Brew;
+  Coffee | CoffeeBag | LegacyBeanRemotePayload | Machine | Grinder | Brew;
 
 function withoutRemoteOwner(payload: unknown): unknown {
   if (

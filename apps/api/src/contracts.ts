@@ -57,12 +57,7 @@ const coffeeBagPayloadSchema = z
     roastedOn: z.string().date().optional(),
     purchasedOn: z.string().date().optional(),
     openedOn: z.string().date().optional(),
-    startingWeightGrams: z
-      .number()
-      .finite()
-      .positive()
-      .max(100_000)
-      .optional(),
+    startingWeightGrams: z.number().finite().positive().max(100_000).optional(),
     notes: optionalTextSchema,
     createdAt: timestampSchema,
   })

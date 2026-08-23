@@ -33,7 +33,7 @@ export function CoffeeLibrary({ ownerId, coffees, bags }: CoffeeLibraryProps) {
           onClick={() => setDialog({ mode: "coffee" })}
         >
           <Plus className="h-4 w-4" />
-          Add Coffee
+          Add coffee
         </button>
       </div>
 
@@ -61,7 +61,7 @@ export function CoffeeLibrary({ ownerId, coffees, bags }: CoffeeLibraryProps) {
                     onClick={() => setDialog({ mode: "bag", coffee })}
                   >
                     <Plus className="h-4 w-4" />
-                    Add Another Bag
+                    Add another bag
                   </button>
                 </div>
                 <ul className="divide-y divide-line">
