@@ -9,8 +9,9 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { deleteBrew } from "@/lib/db";
-import type { Brew, Coffee, CoffeeBag } from "@/lib/models";
+import { formatBagLabel } from "../lib/coffee-form";
+import { deleteBrew } from "../lib/db";
+import type { Brew, Coffee, CoffeeBag } from "../lib/models";
 import { EmptyState, PageHeading, formatDate } from "./ui";
 
 export function HistoryView({
@@ -158,6 +159,7 @@ export function HistoryView({
                   )}
                 </span>
                 <span className="block text-xs text-muted">
+                  {bag ? formatBagLabel(bag) : "Roast date not set"} /{" "}
                   {formatDate(brew.createdAt)} / grind {brew.grind}
                 </span>
               </span>
@@ -196,6 +198,11 @@ export function HistoryView({
                   {formatDate(selected.createdAt)}
                 </p>
                 <h2 className="text-xl font-black">{selectedCoffee?.name}</h2>
+                <p className="mt-1 text-sm text-muted">
+                  {selectedBag
+                    ? formatBagLabel(selectedBag)
+                    : "Roast date not set"}
+                </p>
               </div>
               <button
                 className="icon-button"
