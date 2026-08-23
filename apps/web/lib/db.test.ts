@@ -803,7 +803,9 @@ describe("owner-scoped persistence", () => {
       yield: 42,
       updatedAt: "2026-08-22T12:01:00.000Z",
     });
-    const secondOperation = (await getOperations(alice))[1]!;
+    const secondOperation = (await getOperations(alice)).find(
+      (candidate) => candidate.operationId !== firstOperation.operationId,
+    )!;
 
     await acknowledgeOperations(alice, [firstOperation.operationId]);
 

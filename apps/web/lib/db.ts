@@ -743,7 +743,7 @@ function prepareRemoteOperation(
     if (remote.payload == null) {
       throw new Error("Remote upsert payload is required");
     }
-    payload = isLegacyBeanPayload(remote.payload)
+    payload = entity === "bean" && isLegacyBeanPayload(remote.payload)
       ? parseLegacyBeanRemotePayload(remote.payload)
       : parseRemotePayload(entity, remote.payload);
     const payloadId = isLegacyBeanPayload(payload)
@@ -802,13 +802,19 @@ async function applyPreparedRemoteOperation(
   const table = tableForEntity(remote.entity);
   const key = ownerKey(ownerId, remote.entityId);
   const current = await table.get(key);
+  const legacyBeanPayload =
+    remote.action === "upsert" &&
+    remote.entity === "bean" &&
+    isLegacyBeanPayload(remote.payload)
+      ? remote.payload
+      : undefined;
   const hasPendingEntityOperation = await hasPendingLocalOperation(
     ownerId,
     remote.entity,
     remote.entityId,
     ignoredPendingIds,
   );
-  if (hasPendingEntityOperation) return;
+  if (hasPendingEntityOperation && !legacyBeanPayload) return;
 
   if (remote.action === "delete") {
     if (!current) return;
@@ -834,16 +840,19 @@ async function applyPreparedRemoteOperation(
     return;
   }
 
-  if (remote.entity === "bean" && isLegacyBeanPayload(remote.payload)) {
+  if (legacyBeanPayload) {
     const hasPendingCoffeeOperation = await hasPendingLocalOperation(
       ownerId,
       "coffee",
-      remote.payload.coffee.id,
+      legacyBeanPayload.coffee.id,
       ignoredPendingIds,
     );
-    if (hasPendingCoffeeOperation) return;
-    await db.coffees.put({ ...remote.payload.coffee, ownerId });
-    await db.bags.put({ ...remote.payload.bag, ownerId });
+    if (!hasPendingCoffeeOperation) {
+      await db.coffees.put({ ...legacyBeanPayload.coffee, ownerId });
+    }
+    if (!hasPendingEntityOperation) {
+      await db.bags.put({ ...legacyBeanPayload.bag, ownerId });
+    }
     return;
   }
 

@@ -299,7 +299,56 @@ describe("applyRemoteOperation", () => {
     });
   });
 
-  it("does not replay a legacy bean over pending Coffee work", async () => {
+  it("rejects a normalized legacy payload under a non-bean entity envelope", async () => {
+    const normalized = parseRemotePayload("bean", legacyBean());
+
+    await expect(
+      applyRemoteOperation(alice, {
+        entity: "coffee",
+        entityId: ids.bean,
+        action: "upsert",
+        payload: normalized,
+      }),
+    ).rejects.toThrow();
+
+    expect(await db.coffees.get([alice, ids.bean])).toBeUndefined();
+    expect(await db.bags.get([alice, ids.bean])).toBeUndefined();
+  });
+
+  it("applies only the Coffee from a legacy bean when the bag has pending work", async () => {
+    const localCoffee = { ...coffee(ids.bean), name: "Local current Coffee" };
+    const localBag = {
+      ...bag(ids.bean, ids.bean),
+      notes: "Local current bag",
+    };
+    await saveCoffeeWithBag(alice, localCoffee, localBag);
+    const coffeeOperation = await db.operations
+      .where("ownerId")
+      .equals(alice)
+      .filter((pending) => pending.entity === "coffee")
+      .first();
+
+    await applyRemoteOperation(
+      alice,
+      {
+        entity: "bean",
+        entityId: ids.bean,
+        action: "upsert",
+        payload: legacyBean(),
+      },
+      [coffeeOperation!.operationId],
+    );
+
+    expect(await db.coffees.get([alice, ids.bean])).toMatchObject({
+      name: legacyBean().name,
+      originCountry: legacyBean().origin,
+    });
+    expect(await db.bags.get([alice, ids.bean])).toMatchObject({
+      notes: "Local current bag",
+    });
+  });
+
+  it("applies only the bag from a legacy bean when the Coffee has pending work", async () => {
     const localCoffee = { ...coffee(ids.bean), name: "Local current Coffee" };
     const localBag = {
       ...bag(ids.bean, ids.bean),
@@ -326,8 +375,11 @@ describe("applyRemoteOperation", () => {
     expect(await db.coffees.get([alice, ids.bean])).toMatchObject({
       name: "Local current Coffee",
     });
-    expect(await db.bags.get([alice, ids.bean])).toMatchObject({
-      notes: "Local current bag",
+    expect(await db.bags.get([alice, ids.bean])).toEqual({
+      id: ids.bean,
+      coffeeId: ids.bean,
+      createdAt,
+      ownerId: alice,
     });
   });
 
