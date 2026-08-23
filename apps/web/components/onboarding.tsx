@@ -1,22 +1,85 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from "react";
 import { ArrowRight, Coffee, Gauge, RotateCw } from "lucide-react";
 import {
   makeId,
-  saveBean,
+  saveCoffeeWithBag,
   saveGrinder,
   saveMachine,
   setOwnerPreference,
-} from "@/lib/db";
-import type { RoastLevel, TemperatureControl } from "@/lib/models";
+} from "../lib/db";
+import { parseBagForm, parseCoffeeForm } from "../lib/coffee-form";
+import type { RoastLevel, TemperatureControl } from "../lib/models";
 import { Brand, Segmented } from "./ui";
+
+export interface OnboardingSetupDraft {
+  coffeeName: string;
+  roaster: string;
+  roast: RoastLevel;
+  roastedOn: string;
+  machine: string;
+  temperatureControl: TemperatureControl;
+  grinder: string;
+  finerDirection: "lower" | "higher";
+}
+
+export async function saveOnboardingSetup(
+  ownerId: string,
+  draft: OnboardingSetupDraft,
+): Promise<void> {
+  const coffeeResult = parseCoffeeForm({
+    name: draft.coffeeName,
+    roaster: draft.roaster,
+    originCountry: "",
+    originRegion: "",
+    producer: "",
+    process: "",
+    varietal: "",
+    elevationMeters: "",
+    roastLevel: draft.roast,
+    notes: "",
+  });
+  const bagResult = parseBagForm({
+    roastedOn: draft.roastedOn,
+    purchasedOn: "",
+    openedOn: "",
+    startingWeightGrams: "",
+    notes: "",
+  });
+  if (!coffeeResult.valid) throw new Error(coffeeResult.message);
+  if (!bagResult.valid) throw new Error(bagResult.message);
+
+  const createdAt = new Date().toISOString();
+  const coffeeId = makeId();
+  await saveCoffeeWithBag(
+    ownerId,
+    { id: coffeeId, ...coffeeResult.value, createdAt },
+    { id: makeId(), coffeeId, ...bagResult.value, createdAt },
+  );
+  await saveMachine(ownerId, {
+    id: makeId(),
+    name: draft.machine.trim(),
+    temperatureControl: draft.temperatureControl,
+    hasPressureControl: false,
+    hasPreinfusion: false,
+    createdAt,
+  });
+  await saveGrinder(ownerId, {
+    id: makeId(),
+    name: draft.grinder.trim(),
+    finerDirection: draft.finerDirection,
+    createdAt,
+  });
+  await setOwnerPreference(ownerId, "onboarded", "true");
+}
 
 export function Onboarding({ ownerId }: { ownerId: string }) {
   const [step, setStep] = useState(0);
   const [beanName, setBeanName] = useState("");
   const [roaster, setRoaster] = useState("");
   const [roast, setRoast] = useState<RoastLevel>("medium");
+  const [roastedOn, setRoastedOn] = useState("");
   const [machine, setMachine] = useState("");
   const [temperatureControl, setTemperatureControl] =
     useState<TemperatureControl>("none");
@@ -26,29 +89,16 @@ export function Onboarding({ ownerId }: { ownerId: string }) {
   );
 
   async function finish() {
-    const createdAt = new Date().toISOString();
-    await saveBean(ownerId, {
-      id: makeId(),
-      name: beanName.trim(),
-      roaster: roaster.trim(),
-      roastLevel: roast,
-      createdAt,
-    });
-    await saveMachine(ownerId, {
-      id: makeId(),
-      name: machine.trim(),
+    await saveOnboardingSetup(ownerId, {
+      coffeeName: beanName,
+      roaster,
+      roast,
+      roastedOn,
+      machine,
       temperatureControl,
-      hasPressureControl: false,
-      hasPreinfusion: false,
-      createdAt,
-    });
-    await saveGrinder(ownerId, {
-      id: makeId(),
-      name: grinder.trim(),
+      grinder,
       finerDirection,
-      createdAt,
     });
-    await setOwnerPreference(ownerId, "onboarded", "true");
   }
 
   const valid =
@@ -114,6 +164,17 @@ export function Onboarding({ ownerId }: { ownerId: string }) {
                 { value: "dark", label: "Dark" },
               ]}
             />
+            <label className="mt-4 block" htmlFor="roasted-on">
+              <span className="label">Roast date (optional)</span>
+              <input
+                id="roasted-on"
+                name="roastedOn"
+                type="date"
+                className="field"
+                value={roastedOn}
+                onChange={(event) => setRoastedOn(event.target.value)}
+              />
+            </label>
           </>
         )}
         {step === 1 && (
