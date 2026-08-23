@@ -119,6 +119,8 @@ const payloadSchemas = {
   brew: BrewPayloadSchema,
 } as const;
 
+type RemoteSyncEntity = Exclude<SyncEntity, "coffee">;
+
 export type RemotePayload = Bean | Machine | Grinder | Brew;
 
 function withoutRemoteOwner(payload: unknown): unknown {
@@ -136,9 +138,9 @@ function withoutRemoteOwner(payload: unknown): unknown {
   return entity;
 }
 
-export function parseRemoteEntity(entity: string): SyncEntity {
+export function parseRemoteEntity(entity: string): RemoteSyncEntity {
   if (Object.prototype.hasOwnProperty.call(payloadSchemas, entity)) {
-    return entity as SyncEntity;
+    return entity as RemoteSyncEntity;
   }
   throw new Error(`Unsupported sync entity: ${entity}`);
 }

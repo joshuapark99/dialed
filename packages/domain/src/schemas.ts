@@ -40,6 +40,34 @@ export const BeanSchema = z
   })
   .strict();
 
+export const CoffeeSchema = z
+  .object({
+    ...entityFields,
+    name: z.string().trim().min(1).max(120),
+    roaster: z.string().trim().min(1).max(120),
+    originCountry: z.string().trim().min(1).max(120).optional(),
+    originRegion: z.string().trim().min(1).max(120).optional(),
+    producer: z.string().trim().min(1).max(240).optional(),
+    process: z.string().trim().min(1).max(120).optional(),
+    varietal: z.string().trim().min(1).max(240).optional(),
+    elevationMeters: z.number().finite().int().min(1).max(9000).optional(),
+    roastLevel: RoastLevelSchema.default("unknown"),
+    notes: optionalText,
+  })
+  .strict();
+
+export const CoffeeBagSchema = z
+  .object({
+    ...entityFields,
+    coffeeId: EntityIdSchema,
+    roastedOn: z.string().date().optional(),
+    purchasedOn: z.string().date().optional(),
+    openedOn: z.string().date().optional(),
+    startingWeightGrams: positiveMeasurement.max(100_000).optional(),
+    notes: optionalText,
+  })
+  .strict();
+
 export const TemperatureControlSchema = z.enum(["none", "relative", "precise"]);
 
 export const MachineCapabilitiesSchema = z
@@ -249,6 +277,8 @@ export const RecommendationSchema = z.discriminatedUnion("kind", [
 
 export type RoastLevel = z.infer<typeof RoastLevelSchema>;
 export type Bean = z.infer<typeof BeanSchema>;
+export type Coffee = z.infer<typeof CoffeeSchema>;
+export type CoffeeBag = z.infer<typeof CoffeeBagSchema>;
 export type TemperatureControl = z.infer<typeof TemperatureControlSchema>;
 export type MachineCapabilities = z.infer<typeof MachineCapabilitiesSchema>;
 export type MachineProfile = z.infer<typeof MachineProfileSchema>;

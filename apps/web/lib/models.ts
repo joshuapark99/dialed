@@ -14,6 +14,32 @@ export interface Bean {
   createdAt: string;
 }
 
+export interface Coffee {
+  id: string;
+  name: string;
+  roaster: string;
+  originCountry?: string;
+  originRegion?: string;
+  producer?: string;
+  process?: string;
+  varietal?: string;
+  elevationMeters?: number;
+  roastLevel: RoastLevel | "unknown";
+  notes?: string;
+  createdAt: string;
+}
+
+export interface CoffeeBag {
+  id: string;
+  coffeeId: string;
+  roastedOn?: string;
+  purchasedOn?: string;
+  openedOn?: string;
+  startingWeightGrams?: number;
+  notes?: string;
+  createdAt: string;
+}
+
 export interface Machine {
   id: string;
   name: string;
@@ -91,7 +117,7 @@ export interface Preference {
   value: string;
 }
 
-export type SyncEntity = "bean" | "machine" | "grinder" | "brew";
+export type SyncEntity = "coffee" | "bean" | "machine" | "grinder" | "brew";
 
 export interface SyncOperation {
   operationId: string;

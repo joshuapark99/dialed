@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   BeanSchema,
+  CoffeeBagSchema,
+  CoffeeSchema,
   EspressoBrewSchema,
   GrinderProfileSchema,
   MachineProfileSchema,
@@ -15,6 +17,7 @@ import {
 const ids = {
   user: "018f0c7a-83f7-7def-8f74-4f31aa767099",
   bean: "018f0c7a-83f7-7def-8f74-4f31aa767100",
+  bag: "018f0c7a-83f7-7def-8f74-4f31aa767106",
   machine: "018f0c7a-83f7-7def-8f74-4f31aa767101",
   grinder: "018f0c7a-83f7-7def-8f74-4f31aa767102",
   brew: "018f0c7a-83f7-7def-8f74-4f31aa767103",
@@ -23,6 +26,37 @@ const ids = {
 } as const;
 
 const timestamp = "2026-08-22T12:00:00.000Z";
+
+const validCoffee = {
+  id: ids.bean,
+  userId: null,
+  name: "Hualalai Kona",
+  roaster: "Coffee Purveyors",
+  originCountry: "United States",
+  originRegion: "Kona",
+  producer: "Hualalai Estate",
+  process: "Washed",
+  varietal: "Typica",
+  elevationMeters: 700,
+  roastLevel: "medium-light",
+  notes: "Seasonal release",
+  createdAt: timestamp,
+  updatedAt: timestamp,
+  deletedAt: null,
+};
+
+const validBag = {
+  id: ids.bag,
+  userId: null,
+  coffeeId: ids.bean,
+  roastedOn: "2026-08-12",
+  purchasedOn: "2026-08-14",
+  openedOn: "2026-08-18",
+  startingWeightGrams: 340,
+  createdAt: timestamp,
+  updatedAt: timestamp,
+  deletedAt: null,
+};
 
 const machine = MachineProfileSchema.parse({
   id: ids.machine,
@@ -98,6 +132,30 @@ describe("schemas", () => {
     expect(() =>
       BeanSchema.parse({ ...bean, id: "018f0c7a-83f7-4def-8f74-4f31aa767100" }),
     ).toThrow("UUIDv7");
+  });
+
+  it("validates reusable coffee details and a physical bag", () => {
+    expect(CoffeeSchema.parse(validCoffee)).toMatchObject({
+      name: "Hualalai Kona",
+      elevationMeters: 700,
+    });
+
+    expect(CoffeeBagSchema.parse(validBag)).toMatchObject({
+      coffeeId: ids.bean,
+      startingWeightGrams: 340,
+    });
+  });
+
+  it.each([0, -1, 9001])("rejects invalid coffee elevation %s", (value) => {
+    expect(() =>
+      CoffeeSchema.parse({ ...validCoffee, elevationMeters: value }),
+    ).toThrow();
+  });
+
+  it.each([0, -1])("rejects invalid starting bag weight %s", (value) => {
+    expect(() =>
+      CoffeeBagSchema.parse({ ...validBag, startingWeightGrams: value }),
+    ).toThrow();
   });
 });
 
