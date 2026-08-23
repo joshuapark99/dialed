@@ -2,6 +2,8 @@ import Dexie, { type EntityTable, type Table, type Transaction } from "dexie";
 import type {
   Bean,
   Brew,
+  Coffee,
+  CoffeeBag,
   Grinder,
   Machine,
   Owned,
@@ -61,6 +63,13 @@ const ownerScopedStores = {
     "[ownerId+operationId], ownerId, [ownerId+createdAt], operationId, entity, entityId, createdAt",
 } as const;
 
+const coffeeAndBagStores = {
+  ownedCoffees:
+    "[ownerId+id], ownerId, [ownerId+createdAt], id, name, roaster, createdAt",
+  ownedBeans:
+    "[ownerId+id], ownerId, [ownerId+createdAt], [ownerId+coffeeId], id, coffeeId, createdAt",
+} as const;
+
 const migratedTablePairs = [
   ["beans", "ownedBeans"],
   ["machines", "ownedMachines"],
@@ -83,8 +92,40 @@ function ownerKey(ownerId: string, localId: string): OwnerScopedKey {
   return [ownerId, localId];
 }
 
+function coffeeFromLegacyBean(bean: Bean): Coffee {
+  const { id, name, roaster, origin, roastLevel, createdAt } = bean;
+  return {
+    id,
+    name,
+    roaster,
+    originCountry: origin,
+    roastLevel,
+    createdAt,
+  };
+}
+
+function bagFromLegacyBean(bean: Bean): CoffeeBag {
+  return {
+    id: bean.id,
+    coffeeId: bean.id,
+    createdAt: bean.createdAt,
+  };
+}
+
+function legacyRoastLevel(
+  roastLevel: Coffee["roastLevel"],
+): Bean["roastLevel"] {
+  if (roastLevel === "medium-light") return "light";
+  if (roastLevel === "medium-dark") return "dark";
+  if (roastLevel === "unknown") return "medium";
+  return roastLevel;
+}
+
 export class DialedDatabase extends Dexie {
-  beans!: Table<Owned<Bean>, OwnerScopedKey>;
+  coffees!: Table<Owned<Coffee>, OwnerScopedKey>;
+  bags!: Table<Owned<CoffeeBag>, OwnerScopedKey>;
+  /** @deprecated Remove in Task 5 after every legacy Bean view is migrated. */
+  beans!: Table<Owned<CoffeeBag>, OwnerScopedKey>;
   machines!: Table<Owned<Machine>, OwnerScopedKey>;
   grinders!: Table<Owned<Grinder>, OwnerScopedKey>;
   brews!: Table<Owned<Brew>, OwnerScopedKey>;
@@ -148,7 +189,37 @@ export class DialedDatabase extends Dexie {
       preferences: "key",
       ...ownerScopedStores,
     });
+    this.version(6)
+      .stores({
+        preferences: "key",
+        ...ownerScopedStores,
+        ...coffeeAndBagStores,
+      })
+      .upgrade(async (transaction) => {
+        const legacyBeans = (await transaction
+          .table("ownedBeans")
+          .toArray()) as Array<Owned<Bean>>;
+        if (!legacyBeans.length) return;
 
+        await transaction.table("ownedCoffees").bulkPut(
+          legacyBeans.map(({ ownerId, ...legacyBean }) => ({
+            ...coffeeFromLegacyBean(legacyBean),
+            ownerId,
+          })),
+        );
+        await transaction.table("ownedBeans").bulkPut(
+          legacyBeans.map(({ ownerId, id, createdAt }) => ({
+            ownerId,
+            id,
+            coffeeId: id,
+            createdAt,
+          })),
+        );
+      });
+
+    this.coffees = this.table("ownedCoffees");
+    this.bags = this.table("ownedBeans");
+    // Deprecated adapter: remove in Task 5 after every Bean view is migrated.
     this.beans = this.table("ownedBeans");
     this.machines = this.table("ownedMachines");
     this.grinders = this.table("ownedGrinders");
@@ -198,8 +269,41 @@ export async function setOwnerPreference(
   await db.preferences.put({ key: ownerPreferenceKey(ownerId, key), value });
 }
 
+/** @deprecated Remove in Task 5 after every legacy Bean view is migrated. */
 export async function getBeans(ownerId: string): Promise<Array<Owned<Bean>>> {
-  return db.beans.where("ownerId").equals(ownerId).sortBy("createdAt");
+  const [bags, coffees] = await Promise.all([
+    getCoffeeBags(ownerId),
+    getCoffees(ownerId),
+  ]);
+  const coffeesById = new Map(coffees.map((coffee) => [coffee.id, coffee]));
+
+  return bags.flatMap((bag) => {
+    const coffee = coffeesById.get(bag.coffeeId);
+    if (!coffee) return [];
+    return [
+      {
+        ownerId,
+        id: bag.id,
+        name: coffee.name,
+        roaster: coffee.roaster,
+        origin: coffee.originCountry,
+        roastLevel: legacyRoastLevel(coffee.roastLevel),
+        createdAt: bag.createdAt,
+      },
+    ];
+  });
+}
+
+export async function getCoffees(
+  ownerId: string,
+): Promise<Array<Owned<Coffee>>> {
+  return db.coffees.where("ownerId").equals(ownerId).sortBy("createdAt");
+}
+
+export async function getCoffeeBags(
+  ownerId: string,
+): Promise<Array<Owned<CoffeeBag>>> {
+  return db.bags.where("ownerId").equals(ownerId).sortBy("createdAt");
 }
 
 export async function getMachines(
@@ -235,7 +339,8 @@ export async function clearOwnerData(
   return db.transaction(
     "rw",
     [
-      db.beans,
+      db.coffees,
+      db.bags,
       db.machines,
       db.grinders,
       db.brews,
@@ -265,7 +370,8 @@ export async function clearOwnerData(
 
 async function deleteOwnerRecords(ownerId: string): Promise<void> {
   await Promise.all([
-    db.beans.where("ownerId").equals(ownerId).delete(),
+    db.coffees.where("ownerId").equals(ownerId).delete(),
+    db.bags.where("ownerId").equals(ownerId).delete(),
     db.machines.where("ownerId").equals(ownerId).delete(),
     db.grinders.where("ownerId").equals(ownerId).delete(),
     db.brews.where("ownerId").equals(ownerId).delete(),
@@ -284,7 +390,8 @@ async function destructivelyClearOwnerData(
   return db.transaction(
     "rw",
     [
-      db.beans,
+      db.coffees,
+      db.bags,
       db.machines,
       db.grinders,
       db.brews,
@@ -356,14 +463,52 @@ function deletionOperation(
   };
 }
 
+/** @deprecated Remove in Task 5 after every legacy Bean view is migrated. */
 export async function saveBean(ownerId: string, bean: Bean) {
+  await saveCoffeeWithBag(
+    ownerId,
+    coffeeFromLegacyBean(bean),
+    bagFromLegacyBean(bean),
+  );
+}
+
+export async function saveCoffeeWithBag(
+  ownerId: string,
+  coffee: Coffee,
+  bag: CoffeeBag,
+): Promise<void> {
+  if (bag.coffeeId !== coffee.id) {
+    throw new Error("Coffee bag must reference its Coffee");
+  }
+
   await db.transaction(
     "rw",
-    [db.beans, db.operations, db.preferences],
+    [db.coffees, db.bags, db.operations, db.preferences],
     async () => {
       await assertOwnerWritable(ownerId);
-      await db.beans.put({ ...bean, ownerId });
-      await db.operations.add(operation(ownerId, "bean", bean.id, { ...bean }));
+      await db.coffees.put({ ...coffee, ownerId });
+      await db.bags.put({ ...bag, ownerId });
+      await db.operations.add(
+        operation(ownerId, "coffee", coffee.id, { ...coffee }),
+      );
+      await db.operations.add(operation(ownerId, "bean", bag.id, { ...bag }));
+    },
+  );
+}
+
+export async function saveCoffeeBag(
+  ownerId: string,
+  bag: CoffeeBag,
+): Promise<void> {
+  await db.transaction(
+    "rw",
+    [db.coffees, db.bags, db.operations, db.preferences],
+    async () => {
+      await assertOwnerWritable(ownerId);
+      const coffee = await db.coffees.get(ownerKey(ownerId, bag.coffeeId));
+      if (!coffee) throw new Error("Coffee does not exist for owner");
+      await db.bags.put({ ...bag, ownerId });
+      await db.operations.add(operation(ownerId, "bean", bag.id, { ...bag }));
     },
   );
 }
@@ -553,7 +698,7 @@ interface PreparedRemoteOperation {
 }
 
 type OwnerScopedRecord =
-  Owned<Bean> | Owned<Machine> | Owned<Grinder> | Owned<Brew>;
+  Owned<CoffeeBag> | Owned<Machine> | Owned<Grinder> | Owned<Brew>;
 
 function prepareRemoteOperation(
   remote: RemoteOperation,
@@ -581,7 +726,7 @@ function tableForEntity(
 ): Table<OwnerScopedRecord, OwnerScopedKey> {
   const table =
     entity === "bean"
-      ? db.beans
+      ? db.bags
       : entity === "machine"
         ? db.machines
         : entity === "grinder"
@@ -615,6 +760,13 @@ async function applyPreparedRemoteOperation(
     return;
   }
 
+  if (remote.entity === "bean") {
+    const legacyBean = remote.payload as Bean;
+    await db.coffees.put({ ...coffeeFromLegacyBean(legacyBean), ownerId });
+    await db.bags.put({ ...bagFromLegacyBean(legacyBean), ownerId });
+    return;
+  }
+
   const record =
     remote.entity === "brew"
       ? { ...remote.payload!, ownerId, syncState: "synced" as const }
@@ -632,7 +784,9 @@ export async function applyRemoteOperation(
 
   await db.transaction(
     "rw",
-    [table, db.operations, db.preferences],
+    remote.entity === "bean"
+      ? [db.coffees, db.bags, db.operations, db.preferences]
+      : [table, db.operations, db.preferences],
     async () => {
       await assertOwnerWritable(ownerId);
       await applyPreparedRemoteOperation(
@@ -661,7 +815,8 @@ export async function applyRemotePage(
   await db.transaction(
     "rw",
     [
-      db.beans,
+      db.coffees,
+      db.bags,
       db.machines,
       db.grinders,
       db.brews,

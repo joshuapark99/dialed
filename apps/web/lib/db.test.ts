@@ -15,6 +15,8 @@ import {
   discardAnonymousData,
   getBeans,
   getBrews,
+  getCoffeeBags,
+  getCoffees,
   getGrinders,
   getMachines,
   getOperations,
@@ -23,12 +25,14 @@ import {
   removeOperations,
   saveBean,
   saveBrew,
+  saveCoffeeBag,
+  saveCoffeeWithBag,
   saveGrinder,
   saveMachine,
   setOwnerPreference,
   updateBrew,
 } from "./db";
-import type { Bean, Brew, Grinder, Machine } from "./models";
+import type { Bean, Brew, Coffee, CoffeeBag, Grinder, Machine } from "./models";
 
 const alice = "account:alice";
 const bob = "account:bob";
@@ -39,6 +43,26 @@ function bean(id: string, name: string): Bean {
     name,
     roaster: "Test Roaster",
     roastLevel: "medium",
+    createdAt: "2026-08-22T12:00:00.000Z",
+  };
+}
+
+function coffee(id: string, name: string): Coffee {
+  return {
+    id,
+    name,
+    roaster: "Test Roaster",
+    originCountry: "Colombia",
+    roastLevel: "medium-light",
+    createdAt: "2026-08-22T12:00:00.000Z",
+  };
+}
+
+function coffeeBag(id: string, coffeeId: string): CoffeeBag {
+  return {
+    id,
+    coffeeId,
+    roastedOn: "2026-08-20",
     createdAt: "2026-08-22T12:00:00.000Z",
   };
 }
@@ -263,6 +287,113 @@ describe("owner-inclusive primary keys", () => {
   });
 });
 
+describe("coffee and bag persistence", () => {
+  it("migrates version-5 beans into paired Coffees and bags without changing brew references", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    const legacy = new Dexie("dialed-local");
+    legacy.version(5).stores({
+      preferences: "key",
+      ownedBeans:
+        "[ownerId+id], ownerId, [ownerId+createdAt], id, name, roaster, createdAt",
+      ownedMachines:
+        "[ownerId+id], ownerId, [ownerId+createdAt], id, name, createdAt",
+      ownedGrinders:
+        "[ownerId+id], ownerId, [ownerId+createdAt], id, name, createdAt",
+      ownedBrews:
+        "[ownerId+id], ownerId, [ownerId+createdAt], [ownerId+beanId], id, beanId, machineId, grinderId, createdAt, dialedAt, syncState",
+      ownedOperations:
+        "[ownerId+operationId], ownerId, [ownerId+createdAt], operationId, entity, entityId, createdAt",
+    });
+    await legacy.open();
+    const legacyBean = {
+      ...bean("0198d3a4-1111-7000-8000-000000000090", "Legacy Colombian"),
+      origin: "Colombia",
+      ownerId: alice,
+    };
+    const legacyBrew = {
+      ...brew("0198d3a4-1111-7000-8000-000000000091", legacyBean.id),
+      ownerId: alice,
+    };
+    await legacy.table("ownedBeans").put(legacyBean);
+    await legacy.table("ownedBrews").put(legacyBrew);
+    legacy.close();
+
+    await db.open();
+
+    expect(await getCoffees(alice)).toEqual([
+      expect.objectContaining({
+        id: legacyBean.id,
+        name: legacyBean.name,
+        roaster: legacyBean.roaster,
+        originCountry: legacyBean.origin,
+        roastLevel: legacyBean.roastLevel,
+      }),
+    ]);
+    expect(await getCoffeeBags(alice)).toEqual([
+      expect.objectContaining({ id: legacyBean.id, coffeeId: legacyBean.id }),
+    ]);
+    expect((await getBrews(alice))[0]?.beanId).toBe(legacyBean.id);
+  });
+
+  it("rolls back both records when queueing a Coffee and first bag fails", async () => {
+    const coffeeRecord = coffee(
+      "0198d3a4-1111-7000-8000-000000000092",
+      "Atomic coffee",
+    );
+    const bagRecord = coffeeBag(coffeeRecord.id, coffeeRecord.id);
+    vi.spyOn(db.operations, "add").mockRejectedValueOnce(
+      new Error("queue unavailable"),
+    );
+
+    await expect(
+      saveCoffeeWithBag(alice, coffeeRecord, bagRecord),
+    ).rejects.toThrow("queue unavailable");
+
+    expect(await getCoffees(alice)).toEqual([]);
+    expect(await getCoffeeBags(alice)).toEqual([]);
+  });
+
+  it("rejects a first bag whose Coffee ID does not match its Coffee", async () => {
+    const coffeeRecord = coffee(
+      "0198d3a4-1111-7000-8000-000000000093",
+      "Mismatched coffee",
+    );
+    const bagRecord = coffeeBag(
+      "0198d3a4-1111-7000-8000-000000000094",
+      "0198d3a4-1111-7000-8000-000000000095",
+    );
+
+    await expect(
+      saveCoffeeWithBag(alice, coffeeRecord, bagRecord),
+    ).rejects.toThrow("Coffee bag must reference its Coffee");
+    expect(await getCoffees(alice)).toEqual([]);
+    expect(await getCoffeeBags(alice)).toEqual([]);
+  });
+
+  it("rejects a bag when its Coffee is absent or belongs to another owner", async () => {
+    const coffeeId = "0198d3a4-1111-7000-8000-000000000096";
+    const bagRecord = coffeeBag(
+      "0198d3a4-1111-7000-8000-000000000097",
+      coffeeId,
+    );
+
+    await expect(saveCoffeeBag(alice, bagRecord)).rejects.toThrow(
+      "Coffee does not exist for owner",
+    );
+
+    await saveCoffeeWithBag(
+      bob,
+      coffee(coffeeId, "Bob's coffee"),
+      coffeeBag(coffeeId, coffeeId),
+    );
+    await expect(saveCoffeeBag(alice, bagRecord)).rejects.toThrow(
+      "Coffee does not exist for owner",
+    );
+    expect(await getCoffeeBags(alice)).toEqual([]);
+  });
+});
+
 describe("atomic remote pages", () => {
   it("applies a validated page and advances only that owner's cursor", async () => {
     const beanId = "0198d3a4-1111-7000-8000-000000000084";
@@ -468,6 +599,8 @@ describe("owner-scoped persistence", () => {
 
     expect(await clearOwnerData(alice)).toEqual({ cleared: true });
     expect(await getBeans(alice)).toEqual([]);
+    expect(await getCoffees(alice)).toEqual([]);
+    expect(await getCoffeeBags(alice)).toEqual([]);
     expect(await getMachines(alice)).toEqual([]);
     expect(await getGrinders(alice)).toEqual([]);
     expect(await getBrews(alice)).toEqual([]);
@@ -479,7 +612,9 @@ describe("owner-scoped persistence", () => {
     expect(await getMachines(bob)).toHaveLength(1);
     expect(await getGrinders(bob)).toHaveLength(1);
     expect(await getBrews(bob)).toHaveLength(1);
-    expect(await getOperations(bob)).toHaveLength(4);
+    expect(await getCoffees(bob)).toHaveLength(1);
+    expect(await getCoffeeBags(bob)).toHaveLength(1);
+    expect(await getOperations(bob)).toHaveLength(5);
     expect(await getOwnerPreference(bob, "onboarded")).toBe("true");
   });
 
@@ -492,10 +627,10 @@ describe("owner-scoped persistence", () => {
     expect(await clearOwnerData(alice)).toEqual({
       cleared: false,
       reason: "pending-operations",
-      pendingCount: 1,
+      pendingCount: 2,
     });
     expect(await getBeans(alice)).toHaveLength(1);
-    expect(await getOperations(alice)).toHaveLength(1);
+    expect(await getOperations(alice)).toHaveLength(2);
   });
 
   it("uses explicitly destructive paths only for anonymous reset and deleted accounts", async () => {
@@ -514,8 +649,12 @@ describe("owner-scoped persistence", () => {
 
     expect(await discardAnonymousData()).toEqual({ cleared: true });
     expect(await getBeans(ANONYMOUS_OWNER_ID)).toEqual([]);
+    expect(await getCoffees(ANONYMOUS_OWNER_ID)).toEqual([]);
+    expect(await getCoffeeBags(ANONYMOUS_OWNER_ID)).toEqual([]);
     expect(await clearDeletedAccountData(alice)).toEqual({ cleared: true });
     expect(await getBeans(alice)).toEqual([]);
+    expect(await getCoffees(alice)).toEqual([]);
+    expect(await getCoffeeBags(alice)).toEqual([]);
     expect(await getOperations(alice)).toEqual([]);
     expect(await getBeans(bob)).toHaveLength(1);
   });
@@ -559,8 +698,8 @@ describe("owner-scoped persistence", () => {
 
     expect(await getBeans(ANONYMOUS_OWNER_ID)).toHaveLength(1);
     expect(await getBeans(bob)).toHaveLength(1);
-    expect(await getOperations(ANONYMOUS_OWNER_ID)).toHaveLength(1);
-    expect(await getOperations(bob)).toHaveLength(1);
+    expect(await getOperations(ANONYMOUS_OWNER_ID)).toHaveLength(2);
+    expect(await getOperations(bob)).toHaveLength(2);
   });
 
   it("does not let a stale cache reset remove a deleted-owner tombstone", async () => {
@@ -690,7 +829,9 @@ describe("owner-scoped persistence", () => {
   it("replays a newer remote value and delete when only the pushed snapshot is pending", async () => {
     const beanId = "0198d3a4-1111-7000-8000-000000000075";
     await saveBean(alice, bean(beanId, "Pushed local value"));
-    const pushedOperationId = (await getOperations(alice))[0]!.operationId;
+    const pushedOperationIds = (await getOperations(alice)).map(
+      ({ operationId }) => operationId,
+    );
 
     await applyRemoteOperation(
       alice,
@@ -700,14 +841,14 @@ describe("owner-scoped persistence", () => {
         action: "upsert",
         payload: bean(beanId, "Newer remote value"),
       },
-      [pushedOperationId],
+      pushedOperationIds,
     );
     expect((await getBeans(alice))[0]?.name).toBe("Newer remote value");
 
     await applyRemoteOperation(
       alice,
       { entity: "bean", entityId: beanId, action: "delete" },
-      [pushedOperationId],
+      pushedOperationIds,
     );
     expect(await getBeans(alice)).toEqual([]);
   });
