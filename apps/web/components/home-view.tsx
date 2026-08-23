@@ -6,23 +6,28 @@ import {
   Plus,
   Target,
 } from "lucide-react";
-import type { Bean, Brew } from "@/lib/models";
+import type { Brew, Coffee as CoffeeModel, CoffeeBag } from "@/lib/models";
 import { EmptyState, PageHeading, formatDate } from "./ui";
 
 export function HomeView({
-  beans,
+  coffees,
+  bags,
   brews,
   onLog,
   onHistory,
 }: {
-  beans: Bean[];
+  coffees: CoffeeModel[];
+  bags: CoffeeBag[];
   brews: Brew[];
   onLog: () => void;
   onHistory: () => void;
 }) {
   const latest = brews[0];
-  const bean = latest
-    ? beans.find((item) => item.id === latest.beanId)
+  const bag = latest
+    ? bags.find((item) => item.id === latest.beanId)
+    : undefined;
+  const coffee = bag
+    ? coffees.find((item) => item.id === bag.coffeeId)
     : undefined;
   const dialed = brews.filter((brew) => brew.dialedAt).length;
 
@@ -54,7 +59,7 @@ export function HomeView({
             <div className="bg-ink px-5 py-5 text-white sm:px-6">
               <div className="mb-6 flex items-center justify-between">
                 <span className="rounded bg-white/10 px-2 py-1 text-xs font-semibold">
-                  {bean?.name ?? "Recent coffee"}
+                  {coffee?.name ?? "Recent coffee"}
                 </span>
                 <span className="text-xs text-white/60">
                   {formatDate(latest.createdAt)}
@@ -120,7 +125,10 @@ export function HomeView({
           </div>
           <div className="panel divide-y divide-line">
             {brews.slice(0, 3).map((brew) => {
-              const brewBean = beans.find((item) => item.id === brew.beanId);
+              const brewBag = bags.find((item) => item.id === brew.beanId);
+              const brewCoffee = brewBag
+                ? coffees.find((item) => item.id === brewBag.coffeeId)
+                : undefined;
               return (
                 <button
                   type="button"
@@ -130,7 +138,7 @@ export function HomeView({
                 >
                   <span className="min-w-0 flex-1">
                     <span className="block truncate font-semibold">
-                      {brewBean?.name}
+                      {brewCoffee?.name}
                     </span>
                     <span className="text-xs text-muted">
                       {formatDate(brew.createdAt)}

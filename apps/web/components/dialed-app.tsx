@@ -15,8 +15,9 @@ import {
 import {
   ANONYMOUS_OWNER_ID,
   db,
-  getBeans,
   getBrews,
+  getCoffeeBags,
+  getCoffees,
   getGrinders,
   getMachines,
   getOwnerPreference,
@@ -106,8 +107,12 @@ function OwnerApplication({
   account: AccountUser | null;
   onAccountChanged: () => Promise<void>;
 }) {
-  const beans = useLiveQuery(
-    async () => (await getBeans(ownerId)).reverse(),
+  const coffees = useLiveQuery(
+    async () => (await getCoffees(ownerId)).reverse(),
+    [ownerId],
+  );
+  const bags = useLiveQuery(
+    async () => (await getCoffeeBags(ownerId)).reverse(),
     [ownerId],
   );
   const machines = useLiveQuery(
@@ -129,7 +134,7 @@ function OwnerApplication({
   const setupState = useLiveQuery(
     async () => ({
       onboarded: await getOwnerPreference(ownerId, "onboarded"),
-      profileCount: await db.beans.where("ownerId").equals(ownerId).count(),
+      profileCount: await db.bags.where("ownerId").equals(ownerId).count(),
     }),
     [ownerId],
   );
@@ -140,7 +145,8 @@ function OwnerApplication({
   const [resettingOwner, setResettingOwner] = useState(false);
   const loaded =
     setupState !== undefined &&
-    beans !== undefined &&
+    coffees !== undefined &&
+    bags !== undefined &&
     machines !== undefined &&
     grinders !== undefined &&
     brews !== undefined &&
@@ -259,7 +265,8 @@ function OwnerApplication({
       return (
         <BrewLog
           ownerId={ownerId}
-          beans={beans}
+          coffees={coffees}
+          bags={bags}
           machines={machines}
           grinders={grinders}
           brews={brews}
@@ -270,22 +277,33 @@ function OwnerApplication({
           }}
         />
       );
-    if (view === "result" && result)
+    if (view === "result" && result) {
+      const bag = bags.find((item) => item.id === result.beanId);
+      const coffee = bag
+        ? coffees.find((item) => item.id === bag.coffeeId)
+        : undefined;
       return (
         <BrewResult
           ownerId={ownerId}
           brew={result}
-          bean={beans.find((bean) => bean.id === result.beanId)}
-          reference={brews.find((brew) => brew.id === result.comparisonBrewId)}
+          coffee={coffee}
+          bag={bag}
+          reference={brews.find(
+            (brew) =>
+              brew.id === result.comparisonBrewId &&
+              brew.beanId === result.beanId,
+          )}
           onDone={() => navigate("home")}
           onLogAnother={() => navigate("log")}
         />
       );
+    }
     if (view === "history")
       return (
         <HistoryView
           ownerId={ownerId}
-          beans={beans}
+          coffees={coffees}
+          bags={bags}
           brews={brews}
           onLog={() => navigate("log")}
         />
@@ -294,7 +312,8 @@ function OwnerApplication({
       return (
         <SetupView
           ownerId={ownerId}
-          beans={beans}
+          coffees={coffees}
+          bags={bags}
           machines={machines}
           grinders={grinders}
           brews={brews}
@@ -308,7 +327,8 @@ function OwnerApplication({
       );
     return (
       <HomeView
-        beans={beans}
+        coffees={coffees}
+        bags={bags}
         brews={brews}
         onLog={() => navigate("log")}
         onHistory={() => navigate("history")}

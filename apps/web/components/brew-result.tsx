@@ -8,21 +8,24 @@ import {
   Sparkles,
   Target,
 } from "lucide-react";
+import { formatBagLabel } from "@/lib/coffee-form";
 import { updateBrew } from "@/lib/db";
-import type { Bean, Brew } from "@/lib/models";
+import type { Brew, Coffee, CoffeeBag } from "@/lib/models";
 import { formatDate } from "./ui";
 
 export function BrewResult({
   ownerId,
   brew,
-  bean,
+  coffee,
+  bag,
   reference,
   onDone,
   onLogAnother,
 }: {
   ownerId: string;
   brew: Brew;
-  bean?: Bean;
+  coffee?: Coffee;
+  bag?: CoffeeBag;
   reference?: Brew;
   onDone: () => void;
   onLogAnother: () => void;
@@ -121,9 +124,9 @@ export function BrewResult({
         <RotateCcw className="h-4 w-4" />
         Back to dashboard
       </button>
-      {bean && (
+      {coffee && bag && (
         <p className="mt-5 text-center text-xs text-muted">
-          {bean.roaster} / {bean.name}
+          {coffee.roaster} / {coffee.name} / {formatBagLabel(bag)}
         </p>
       )}
     </div>

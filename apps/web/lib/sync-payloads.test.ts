@@ -2,12 +2,7 @@ import "fake-indexeddb/auto";
 
 import Dexie from "dexie";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  applyRemoteOperation,
-  db,
-  saveBean,
-  saveCoffeeWithBag,
-} from "./db";
+import { applyRemoteOperation, db, saveCoffeeWithBag } from "./db";
 import type { Bean, Brew, Coffee, CoffeeBag, Grinder, Machine } from "./models";
 import { parseRemotePayload } from "./sync-payloads";
 import { syncEntityFixtures } from "../../../test-fixtures/sync-entities";
@@ -39,6 +34,21 @@ function legacyBean(id: string = ids.bean): Bean {
   };
 }
 
+async function saveCoffeeFixture(ownerId: string, bean: Bean) {
+  await saveCoffeeWithBag(
+    ownerId,
+    {
+      id: bean.id,
+      name: bean.name,
+      roaster: bean.roaster,
+      originCountry: bean.origin,
+      roastLevel: bean.roastLevel,
+      createdAt: bean.createdAt,
+    },
+    { id: bean.id, coffeeId: bean.id, createdAt: bean.createdAt },
+  );
+}
+
 function coffee(id: string = ids.coffee): Coffee {
   return {
     id,
@@ -56,10 +66,7 @@ function coffee(id: string = ids.coffee): Coffee {
   };
 }
 
-function bag(
-  id: string = ids.bag,
-  coffeeId: string = ids.coffee,
-): CoffeeBag {
+function bag(id: string = ids.bag, coffeeId: string = ids.coffee): CoffeeBag {
   return {
     id,
     coffeeId,
@@ -386,19 +393,22 @@ describe("applyRemoteOperation", () => {
   it.each([
     ["current bag", { ...bag(), startingWeightGrams: 0 }],
     ["legacy bean", { ...legacyBean(), name: "" }],
-  ] as const)("does not write a malformed %s payload", async (_label, payload) => {
-    await expect(
-      applyRemoteOperation(alice, {
-        entity: "bean",
-        entityId: payload.id,
-        action: "upsert",
-        payload,
-      }),
-    ).rejects.toThrow();
+  ] as const)(
+    "does not write a malformed %s payload",
+    async (_label, payload) => {
+      await expect(
+        applyRemoteOperation(alice, {
+          entity: "bean",
+          entityId: payload.id,
+          action: "upsert",
+          payload,
+        }),
+      ).rejects.toThrow();
 
-    expect(await db.coffees.where("ownerId").equals(alice).count()).toBe(0);
-    expect(await db.bags.where("ownerId").equals(alice).count()).toBe(0);
-  });
+      expect(await db.coffees.where("ownerId").equals(alice).count()).toBe(0);
+      expect(await db.bags.where("ownerId").equals(alice).count()).toBe(0);
+    },
+  );
 
   it("deletes a legacy pair when no other bag references its Coffee", async () => {
     await applyRemoteOperation(alice, {
@@ -475,8 +485,8 @@ describe("applyRemoteOperation", () => {
       }),
     ).rejects.toThrow("does not match envelope");
 
-    expect(await db.beans.get([alice, ids.envelope])).toBeUndefined();
-    expect(await db.beans.get([alice, ids.bean])).toBeUndefined();
+    expect(await db.bags.get([alice, ids.envelope])).toBeUndefined();
+    expect(await db.bags.get([alice, ids.bean])).toBeUndefined();
   });
 
   it("rejects malformed upserts before opening a write transaction", async () => {
@@ -495,7 +505,7 @@ describe("applyRemoteOperation", () => {
   });
 
   it("does not delete another owner's entity with the same ID", async () => {
-    await saveBean(bob, legacyBean());
+    await saveCoffeeFixture(bob, legacyBean());
 
     await applyRemoteOperation(alice, {
       entity: "bean",
@@ -503,7 +513,7 @@ describe("applyRemoteOperation", () => {
       action: "delete",
     });
 
-    expect(await db.beans.get([bob, ids.bean])).toMatchObject({
+    expect(await db.bags.get([bob, ids.bean])).toMatchObject({
       id: ids.bean,
       ownerId: bob,
     });

@@ -15,14 +15,23 @@ import {
   parseOptionalFiniteMeasurement,
   parseRequiredPositiveMeasurement,
 } from "@/lib/brew-form";
+import { formatBagLabel } from "@/lib/coffee-form";
 import { makeId, saveBrew } from "@/lib/db";
-import type { Bean, Brew, Grinder, Machine, Taste } from "@/lib/models";
+import type {
+  Brew,
+  Coffee as CoffeeModel,
+  CoffeeBag,
+  Grinder,
+  Machine,
+  Taste,
+} from "@/lib/models";
 import { getRecommendation } from "@/lib/recommendation";
 import { PageHeading, ScorePicker } from "./ui";
 
 interface BrewLogProps {
   ownerId: string;
-  beans: Bean[];
+  coffees: CoffeeModel[];
+  bags: CoffeeBag[];
   machines: Machine[];
   grinders: Grinder[];
   brews: Brew[];
@@ -40,14 +49,15 @@ const initialTaste: Taste = {
 
 export function BrewLog({
   ownerId,
-  beans,
+  coffees,
+  bags,
   machines,
   grinders,
   brews,
   onSaved,
   onCancel,
 }: BrewLogProps) {
-  const [beanId, setBeanId] = useState(beans[0]?.id ?? "");
+  const [beanId, setBeanId] = useState(bags[0]?.id ?? "");
   const [machineId, setMachineId] = useState(machines[0]?.id ?? "");
   const [grinderId, setGrinderId] = useState(grinders[0]?.id ?? "");
   const [dose, setDose] = useState("18");
@@ -201,11 +211,17 @@ export function BrewLog({
                   value={beanId}
                   onChange={(e) => setBeanId(e.target.value)}
                 >
-                  {beans.map((bean) => (
-                    <option key={bean.id} value={bean.id}>
-                      {bean.name}
-                    </option>
-                  ))}
+                  {bags.map((bag) => {
+                    const coffee = coffees.find(
+                      (item) => item.id === bag.coffeeId,
+                    );
+                    return (
+                      <option key={bag.id} value={bag.id}>
+                        {coffee?.name ?? "Unknown coffee"} —{" "}
+                        {formatBagLabel(bag)}
+                      </option>
+                    );
+                  })}
                 </select>
               </label>
               <label>

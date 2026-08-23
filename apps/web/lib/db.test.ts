@@ -13,7 +13,6 @@ import {
   deleteBrew,
   DeletedOwnerWriteError,
   discardAnonymousData,
-  getBeans,
   getBrews,
   getCoffeeBags,
   getCoffees,
@@ -23,7 +22,6 @@ import {
   getOwnerPreference,
   ownerPreferenceKey,
   removeOperations,
-  saveBean,
   saveBrew,
   saveCoffeeBag,
   saveCoffeeWithBag,
@@ -65,6 +63,25 @@ function coffeeBag(id: string, coffeeId: string): CoffeeBag {
     roastedOn: "2026-08-20",
     createdAt: "2026-08-22T12:00:00.000Z",
   };
+}
+
+async function saveCoffeeFixture(ownerId: string, legacyBean: Bean) {
+  await saveCoffeeWithBag(
+    ownerId,
+    {
+      id: legacyBean.id,
+      name: legacyBean.name,
+      roaster: legacyBean.roaster,
+      originCountry: legacyBean.origin,
+      roastLevel: legacyBean.roastLevel,
+      createdAt: legacyBean.createdAt,
+    },
+    {
+      id: legacyBean.id,
+      coffeeId: legacyBean.id,
+      createdAt: legacyBean.createdAt,
+    },
+  );
 }
 
 function brew(id: string, beanId: string): Brew {
@@ -126,8 +143,8 @@ describe("owner-inclusive primary keys", () => {
     const sharedId = "0198d3a4-1111-7000-8000-000000000080";
     const sharedOperationId = "0198d3a4-1111-7000-8000-000000000081";
 
-    await saveBean(alice, bean(sharedId, "Alice bean"));
-    await saveBean(bob, bean(sharedId, "Bob bean"));
+    await saveCoffeeFixture(alice, bean(sharedId, "Alice bean"));
+    await saveCoffeeFixture(bob, bean(sharedId, "Bob bean"));
     await saveMachine(alice, machine(sharedId));
     await saveMachine(bob, { ...machine(sharedId), name: "Bob machine" });
     await saveGrinder(alice, grinder(sharedId));
@@ -153,8 +170,8 @@ describe("owner-inclusive primary keys", () => {
       createdAt: "2026-08-22T12:02:00.000Z",
     });
 
-    expect((await getBeans(alice))[0]?.name).toBe("Alice bean");
-    expect((await getBeans(bob))[0]?.name).toBe("Bob bean");
+    expect((await getCoffees(alice))[0]?.name).toBe("Alice bean");
+    expect((await getCoffees(bob))[0]?.name).toBe("Bob bean");
     expect((await getMachines(alice))[0]?.name).toBe("Legacy machine");
     expect((await getMachines(bob))[0]?.name).toBe("Bob machine");
     expect((await getGrinders(alice))[0]?.name).toBe("Legacy grinder");
@@ -180,8 +197,8 @@ describe("owner-inclusive primary keys", () => {
       entityId: sharedId,
       action: "delete",
     });
-    expect(await getBeans(alice)).toEqual([]);
-    expect((await getBeans(bob))[0]?.name).toBe("Bob bean");
+    expect(await getCoffees(alice)).toEqual([]);
+    expect((await getCoffees(bob))[0]?.name).toBe("Bob bean");
 
     await applyRemoteOperation(alice, {
       entity: "bean",
@@ -189,8 +206,8 @@ describe("owner-inclusive primary keys", () => {
       action: "upsert",
       payload: bean(sharedId, "Alice replay"),
     });
-    expect((await getBeans(alice))[0]?.name).toBe("Alice replay");
-    expect((await getBeans(bob))[0]?.name).toBe("Bob bean");
+    expect((await getCoffees(alice))[0]?.name).toBe("Alice replay");
+    expect((await getCoffees(bob))[0]?.name).toBe("Bob bean");
   });
 
   it("preserves owner-stamped version-3 data while changing primary keys", async () => {
@@ -258,7 +275,7 @@ describe("owner-inclusive primary keys", () => {
         "operations",
       ]),
     );
-    await saveBean(bob, bean(sharedId, "Bob after migration"));
+    await saveCoffeeFixture(bob, bean(sharedId, "Bob after migration"));
     await db.operations.add({
       ownerId: bob,
       operationId,
@@ -269,8 +286,8 @@ describe("owner-inclusive primary keys", () => {
       createdAt: "2026-08-22T12:04:00.000Z",
     });
 
-    expect((await getBeans(alice))[0]?.name).toBe("Alice v3");
-    expect((await getBeans(bob))[0]?.name).toBe("Bob after migration");
+    expect((await getCoffees(alice))[0]?.name).toBe("Alice v3");
+    expect((await getCoffees(bob))[0]?.name).toBe("Bob after migration");
     expect(await getMachines(alice)).toHaveLength(1);
     expect(await getGrinders(alice)).toHaveLength(1);
     expect(await getBrews(alice)).toHaveLength(1);
@@ -452,7 +469,7 @@ describe("atomic remote pages", () => {
       [],
     );
 
-    expect((await getBeans(alice))[0]?.name).toBe("Remote");
+    expect((await getCoffees(alice))[0]?.name).toBe("Remote");
     expect(await getMachines(alice)).toHaveLength(1);
     expect(await getOwnerPreference(alice, "sync-cursor")).toBe("2");
     expect(await getOwnerPreference(bob, "sync-cursor")).toBe("9");
@@ -489,7 +506,7 @@ describe("atomic remote pages", () => {
       ),
     ).rejects.toThrow("machine write failed");
 
-    expect(await getBeans(alice)).toEqual([]);
+    expect(await getCoffees(alice)).toEqual([]);
     expect(await getMachines(alice)).toEqual([]);
     expect(await getOwnerPreference(alice, "sync-cursor")).toBe("4");
   });
@@ -497,7 +514,7 @@ describe("atomic remote pages", () => {
   it("ignores a stale page without changing records or regressing the cursor", async () => {
     const beanId = "0198d3a4-1111-7000-8000-000000000088";
     await setOwnerPreference(alice, "sync-cursor", "8");
-    await saveBean(alice, bean(beanId, "Local newer state"));
+    await saveCoffeeFixture(alice, bean(beanId, "Local newer state"));
     await removeOperations(
       alice,
       (await getOperations(alice)).map(({ operationId }) => operationId),
@@ -518,7 +535,7 @@ describe("atomic remote pages", () => {
       [],
     );
 
-    expect((await getBeans(alice))[0]?.name).toBe("Local newer state");
+    expect((await getCoffees(alice))[0]?.name).toBe("Local newer state");
     expect(await getOwnerPreference(alice, "sync-cursor")).toBe("8");
   });
 });
@@ -532,19 +549,19 @@ afterEach(async () => {
 
 describe("owner-scoped persistence", () => {
   it("queries records only for the requested owner", async () => {
-    await saveBean(
+    await saveCoffeeFixture(
       alice,
       bean("0198d3a4-1111-7000-8000-000000000010", "Alice's coffee"),
     );
-    await saveBean(
+    await saveCoffeeFixture(
       bob,
       bean("0198d3a4-1111-7000-8000-000000000011", "Bob's coffee"),
     );
 
-    expect((await getBeans(alice)).map(({ name }) => name)).toEqual([
+    expect((await getCoffees(alice)).map(({ name }) => name)).toEqual([
       "Alice's coffee",
     ]);
-    expect((await getBeans(bob)).map(({ name }) => name)).toEqual([
+    expect((await getCoffees(bob)).map(({ name }) => name)).toEqual([
       "Bob's coffee",
     ]);
   });
@@ -614,11 +631,11 @@ describe("owner-scoped persistence", () => {
     bobBrew.machineId = bobMachine.id;
     bobBrew.grinderId = bobGrinder.id;
 
-    await saveBean(alice, aliceBean);
+    await saveCoffeeFixture(alice, aliceBean);
     await saveMachine(alice, aliceMachine);
     await saveGrinder(alice, aliceGrinder);
     await saveBrew(alice, aliceBrew);
-    await saveBean(bob, bobBean);
+    await saveCoffeeFixture(bob, bobBean);
     await saveMachine(bob, bobMachine);
     await saveGrinder(bob, bobGrinder);
     await saveBrew(bob, bobBrew);
@@ -630,7 +647,6 @@ describe("owner-scoped persistence", () => {
     );
 
     expect(await clearOwnerData(alice)).toEqual({ cleared: true });
-    expect(await getBeans(alice)).toEqual([]);
     expect(await getCoffees(alice)).toEqual([]);
     expect(await getCoffeeBags(alice)).toEqual([]);
     expect(await getMachines(alice)).toEqual([]);
@@ -638,7 +654,7 @@ describe("owner-scoped persistence", () => {
     expect(await getBrews(alice)).toEqual([]);
     expect(await getOperations(alice)).toEqual([]);
     expect(await getOwnerPreference(alice, "onboarded")).toBeUndefined();
-    expect((await getBeans(bob)).map(({ name }) => name)).toEqual([
+    expect((await getCoffees(bob)).map(({ name }) => name)).toEqual([
       "Bob's coffee",
     ]);
     expect(await getMachines(bob)).toHaveLength(1);
@@ -651,7 +667,7 @@ describe("owner-scoped persistence", () => {
   });
 
   it("can refuse to clear an owner with pending operations", async () => {
-    await saveBean(
+    await saveCoffeeFixture(
       alice,
       bean("0198d3a4-1111-7000-8000-000000000040", "Unsynced coffee"),
     );
@@ -661,34 +677,32 @@ describe("owner-scoped persistence", () => {
       reason: "pending-operations",
       pendingCount: 2,
     });
-    expect(await getBeans(alice)).toHaveLength(1);
+    expect(await getCoffees(alice)).toHaveLength(1);
     expect(await getOperations(alice)).toHaveLength(2);
   });
 
   it("uses explicitly destructive paths only for anonymous reset and deleted accounts", async () => {
-    await saveBean(
+    await saveCoffeeFixture(
       ANONYMOUS_OWNER_ID,
       bean("0198d3a4-1111-7000-8000-000000000041", "Anonymous coffee"),
     );
-    await saveBean(
+    await saveCoffeeFixture(
       alice,
       bean("0198d3a4-1111-7000-8000-000000000042", "Deleted account coffee"),
     );
-    await saveBean(
+    await saveCoffeeFixture(
       bob,
       bean("0198d3a4-1111-7000-8000-000000000043", "Preserved coffee"),
     );
 
     expect(await discardAnonymousData()).toEqual({ cleared: true });
-    expect(await getBeans(ANONYMOUS_OWNER_ID)).toEqual([]);
     expect(await getCoffees(ANONYMOUS_OWNER_ID)).toEqual([]);
     expect(await getCoffeeBags(ANONYMOUS_OWNER_ID)).toEqual([]);
     expect(await clearDeletedAccountData(alice)).toEqual({ cleared: true });
-    expect(await getBeans(alice)).toEqual([]);
     expect(await getCoffees(alice)).toEqual([]);
     expect(await getCoffeeBags(alice)).toEqual([]);
     expect(await getOperations(alice)).toEqual([]);
-    expect(await getBeans(bob)).toHaveLength(1);
+    expect(await getCoffees(bob)).toHaveLength(1);
   });
 
   it("rejects every local write after an account is tombstoned", async () => {
@@ -699,7 +713,7 @@ describe("owner-scoped persistence", () => {
     await clearDeletedAccountData(alice);
 
     const writes = [
-      () => saveBean(alice, bean(beanId, "Late bean")),
+      () => saveCoffeeFixture(alice, bean(beanId, "Late bean")),
       () => saveMachine(alice, machine(machineId)),
       () => saveGrinder(alice, grinder(grinderId)),
       () => saveBrew(alice, brew(brewId, beanId)),
@@ -709,7 +723,7 @@ describe("owner-scoped persistence", () => {
       await expect(write()).rejects.toBeInstanceOf(DeletedOwnerWriteError);
     }
 
-    expect(await getBeans(alice)).toEqual([]);
+    expect(await getCoffees(alice)).toEqual([]);
     expect(await getMachines(alice)).toEqual([]);
     expect(await getGrinders(alice)).toEqual([]);
     expect(await getBrews(alice)).toEqual([]);
@@ -719,17 +733,17 @@ describe("owner-scoped persistence", () => {
   it("keeps anonymous data and a different account writable after deletion", async () => {
     await clearDeletedAccountData(alice);
 
-    await saveBean(
+    await saveCoffeeFixture(
       ANONYMOUS_OWNER_ID,
       bean("0198d3a4-1111-7000-8000-000000000048", "Anonymous after delete"),
     );
-    await saveBean(
+    await saveCoffeeFixture(
       bob,
       bean("0198d3a4-1111-7000-8000-000000000049", "New account"),
     );
 
-    expect(await getBeans(ANONYMOUS_OWNER_ID)).toHaveLength(1);
-    expect(await getBeans(bob)).toHaveLength(1);
+    expect(await getCoffees(ANONYMOUS_OWNER_ID)).toHaveLength(1);
+    expect(await getCoffees(bob)).toHaveLength(1);
     expect(await getOperations(ANONYMOUS_OWNER_ID)).toHaveLength(2);
     expect(await getOperations(bob)).toHaveLength(2);
   });
@@ -741,7 +755,7 @@ describe("owner-scoped persistence", () => {
       DeletedOwnerWriteError,
     );
     await expect(
-      saveBean(
+      saveCoffeeFixture(
         alice,
         bean("0198d3a4-1111-7000-8000-000000000051", "Still blocked"),
       ),
@@ -777,7 +791,7 @@ describe("owner-scoped persistence", () => {
       ),
     ).rejects.toBeInstanceOf(DeletedOwnerWriteError);
 
-    expect(await getBeans(alice)).toEqual([]);
+    expect(await getCoffees(alice)).toEqual([]);
     expect(await getOwnerPreference(alice, "sync-cursor")).toBeUndefined();
   });
 
@@ -842,7 +856,7 @@ describe("owner-scoped persistence", () => {
 
   it("does not replay remote upserts or deletes over an entity with pending local work", async () => {
     const beanId = "0198d3a4-1111-7000-8000-000000000074";
-    await saveBean(alice, bean(beanId, "Local edit"));
+    await saveCoffeeFixture(alice, bean(beanId, "Local edit"));
 
     await applyRemoteOperation(alice, {
       entity: "bean",
@@ -850,19 +864,19 @@ describe("owner-scoped persistence", () => {
       action: "upsert",
       payload: bean(beanId, "Older remote value"),
     });
-    expect((await getBeans(alice))[0]?.name).toBe("Local edit");
+    expect((await getCoffees(alice))[0]?.name).toBe("Local edit");
 
     await applyRemoteOperation(alice, {
       entity: "bean",
       entityId: beanId,
       action: "delete",
     });
-    expect((await getBeans(alice))[0]?.name).toBe("Local edit");
+    expect((await getCoffees(alice))[0]?.name).toBe("Local edit");
   });
 
   it("replays a newer remote value and delete when only the pushed snapshot is pending", async () => {
     const beanId = "0198d3a4-1111-7000-8000-000000000075";
-    await saveBean(alice, bean(beanId, "Pushed local value"));
+    await saveCoffeeFixture(alice, bean(beanId, "Pushed local value"));
     const pushedOperationIds = (await getOperations(alice)).map(
       ({ operationId }) => operationId,
     );
@@ -877,14 +891,14 @@ describe("owner-scoped persistence", () => {
       },
       pushedOperationIds,
     );
-    expect((await getBeans(alice))[0]?.name).toBe("Newer remote value");
+    expect((await getCoffees(alice))[0]?.name).toBe("Newer remote value");
 
     await applyRemoteOperation(
       alice,
       { entity: "bean", entityId: beanId, action: "delete" },
       pushedOperationIds,
     );
-    expect(await getBeans(alice)).toEqual([]);
+    expect(await getCoffees(alice)).toEqual([]);
   });
 
   it("migrates version-2 records and preferences to anonymous ownership", async () => {
@@ -936,7 +950,7 @@ describe("owner-scoped persistence", () => {
 
     await db.open();
 
-    expect(await getBeans(ANONYMOUS_OWNER_ID)).toEqual([
+    expect(await getCoffees(ANONYMOUS_OWNER_ID)).toEqual([
       expect.objectContaining({ name: "Legacy coffee" }),
     ]);
     expect(await getMachines(ANONYMOUS_OWNER_ID)).toEqual([

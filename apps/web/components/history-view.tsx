@@ -10,17 +10,19 @@ import {
   X,
 } from "lucide-react";
 import { deleteBrew } from "@/lib/db";
-import type { Bean, Brew } from "@/lib/models";
+import type { Brew, Coffee, CoffeeBag } from "@/lib/models";
 import { EmptyState, PageHeading, formatDate } from "./ui";
 
 export function HistoryView({
   ownerId,
-  beans,
+  coffees,
+  bags,
   brews,
   onLog,
 }: {
   ownerId: string;
-  beans: Bean[];
+  coffees: Coffee[];
+  bags: CoffeeBag[];
   brews: Brew[];
   onLog: () => void;
 }) {
@@ -32,18 +34,33 @@ export function HistoryView({
   const filtered = useMemo(
     () =>
       brews.filter((brew) => {
-        const bean = beans.find((item) => item.id === brew.beanId);
-        return `${bean?.name} ${bean?.roaster} ${brew.notes ?? ""}`
+        const bag = bags.find((item) => item.id === brew.beanId);
+        const coffee = bag
+          ? coffees.find((item) => item.id === bag.coffeeId)
+          : undefined;
+        return `${coffee?.name} ${coffee?.roaster} ${bag?.roastedOn ?? ""} ${brew.notes ?? ""}`
           .toLowerCase()
           .includes(query.toLowerCase());
       }),
-    [beans, brews, query],
+    [bags, brews, coffees, query],
   );
   const selected = brews.find((brew) => brew.id === selectedId);
+  const selectedBag = selected
+    ? bags.find((bag) => bag.id === selected.beanId)
+    : undefined;
+  const selectedCoffee = selectedBag
+    ? coffees.find((coffee) => coffee.id === selectedBag.coffeeId)
+    : undefined;
   const comparison =
-    brews.find((brew) => brew.id === compareId) ??
+    brews.find(
+      (brew) => brew.id === compareId && brew.beanId === selected?.beanId,
+    ) ??
     (selected
-      ? brews.find((brew) => brew.id === selected.comparisonBrewId)
+      ? brews.find(
+          (brew) =>
+            brew.id === selected.comparisonBrewId &&
+            brew.beanId === selected.beanId,
+        )
       : undefined);
 
   async function removeSelected() {
@@ -103,7 +120,10 @@ export function HistoryView({
       </label>
       <div className="panel divide-y divide-line overflow-hidden">
         {filtered.map((brew) => {
-          const bean = beans.find((item) => item.id === brew.beanId);
+          const bag = bags.find((item) => item.id === brew.beanId);
+          const coffee = bag
+            ? coffees.find((item) => item.id === bag.coffeeId)
+            : undefined;
           return (
             <button
               type="button"
@@ -129,7 +149,7 @@ export function HistoryView({
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-2">
                   <span className="truncate font-bold">
-                    {bean?.name ?? "Unknown coffee"}
+                    {coffee?.name ?? "Unknown coffee"}
                   </span>
                   {brew.dialedAt && (
                     <span className="rounded bg-leaf/10 px-1.5 py-0.5 text-[10px] font-bold uppercase text-leaf">
@@ -175,9 +195,7 @@ export function HistoryView({
                 <p className="text-xs font-bold uppercase text-coral">
                   {formatDate(selected.createdAt)}
                 </p>
-                <h2 className="text-xl font-black">
-                  {beans.find((item) => item.id === selected.beanId)?.name}
-                </h2>
+                <h2 className="text-xl font-black">{selectedCoffee?.name}</h2>
               </div>
               <button
                 className="icon-button"

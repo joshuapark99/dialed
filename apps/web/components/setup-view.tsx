@@ -18,17 +18,17 @@ import {
 import {
   discardAnonymousData,
   makeId,
-  saveBean,
   saveGrinder,
   saveMachine,
 } from "@/lib/db";
+import { buildBrewCsv, buildJsonExport } from "@/lib/export";
 import type {
   AccountUser,
-  Bean,
   Brew,
+  Coffee as CoffeeModel,
+  CoffeeBag,
   Grinder,
   Machine,
-  RoastLevel,
 } from "@/lib/models";
 import {
   AccountMismatchError,
@@ -37,7 +37,8 @@ import {
   signOut,
   type SyncStatus,
 } from "@/lib/sync";
-import { PageHeading, Segmented } from "./ui";
+import { CoffeeLibrary } from "./coffee-library";
+import { PageHeading } from "./ui";
 
 type SetupTab = "coffee" | "equipment" | "settings";
 
@@ -47,7 +48,8 @@ export type OwnerCacheResetResult =
 
 export function SetupView({
   ownerId,
-  beans,
+  coffees,
+  bags,
   machines,
   grinders,
   brews,
@@ -59,7 +61,8 @@ export function SetupView({
   onAccountChanged,
 }: {
   ownerId: string;
-  beans: Bean[];
+  coffees: CoffeeModel[];
+  bags: CoffeeBag[];
   machines: Machine[];
   grinders: Grinder[];
   brews: Brew[];
@@ -71,14 +74,14 @@ export function SetupView({
   onAccountChanged: () => Promise<void>;
 }) {
   const [tab, setTab] = useState<SetupTab>("coffee");
-  const [adding, setAdding] = useState<"bean" | "machine" | "grinder">();
+  const [adding, setAdding] = useState<"machine" | "grinder">();
   const [resetting, setResetting] = useState(false);
 
   function download(format: "json" | "csv") {
     const data =
       format === "json"
-        ? JSON.stringify({ beans, machines, grinders, brews }, null, 2)
-        : toCsv(brews, beans);
+        ? buildJsonExport({ coffees, bags, machines, grinders, brews })
+        : buildBrewCsv({ coffees, bags, brews });
     const blob = new Blob([data], {
       type: format === "json" ? "application/json" : "text/csv",
     });
@@ -182,16 +185,7 @@ export function SetupView({
       </div>
 
       {tab === "coffee" && (
-        <LibrarySection
-          title="Coffee"
-          onAdd={() => setAdding("bean")}
-          items={beans.map((bean) => ({
-            id: bean.id,
-            icon: Coffee,
-            title: bean.name,
-            detail: `${bean.roaster} / ${bean.roastLevel} roast`,
-          }))}
-        />
+        <CoffeeLibrary ownerId={ownerId} coffees={coffees} bags={bags} />
       )}
       {tab === "equipment" && (
         <div className="space-y-6">
@@ -415,22 +409,12 @@ function AddDialog({
   onClose,
 }: {
   ownerId: string;
-  kind: "bean" | "machine" | "grinder";
+  kind: "machine" | "grinder";
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
-  const [secondary, setSecondary] = useState("");
-  const [roast, setRoast] = useState<RoastLevel>("medium");
   async function save() {
     const createdAt = new Date().toISOString();
-    if (kind === "bean")
-      await saveBean(ownerId, {
-        id: makeId(),
-        name: name.trim(),
-        roaster: secondary.trim(),
-        roastLevel: roast,
-        createdAt,
-      });
     if (kind === "machine")
       await saveMachine(ownerId, {
         id: makeId(),
@@ -474,28 +458,6 @@ function AddDialog({
             autoFocus
           />
         </label>
-        {kind === "bean" && (
-          <>
-            <label>
-              <span className="label">Roaster</span>
-              <input
-                className="field mb-4"
-                value={secondary}
-                onChange={(e) => setSecondary(e.target.value)}
-              />
-            </label>
-            <span className="label">Roast</span>
-            <Segmented
-              value={roast}
-              onChange={setRoast}
-              options={[
-                { value: "light", label: "Light" },
-                { value: "medium", label: "Medium" },
-                { value: "dark", label: "Dark" },
-              ]}
-            />
-          </>
-        )}
         <div className="mt-6 grid grid-cols-2 gap-3">
           <button className="button-secondary" type="button" onClick={onClose}>
             Cancel
@@ -503,7 +465,7 @@ function AddDialog({
           <button
             className="button-primary"
             type="button"
-            disabled={!name.trim() || (kind === "bean" && !secondary.trim())}
+            disabled={!name.trim()}
             onClick={() => void save()}
           >
             Add
@@ -512,36 +474,4 @@ function AddDialog({
       </section>
     </div>
   );
-}
-
-function toCsv(brews: Brew[], beans: Bean[]) {
-  const rows = [
-    [
-      "date",
-      "coffee",
-      "dose_g",
-      "yield_g",
-      "duration_s",
-      "grind",
-      "ratio",
-      "enjoyment",
-      "dialed",
-    ],
-    ...brews.map((brew) => [
-      brew.createdAt,
-      beans.find((bean) => bean.id === brew.beanId)?.name ?? "",
-      brew.dose,
-      brew.yield,
-      brew.duration,
-      brew.grind,
-      brew.ratio,
-      brew.taste.enjoyment,
-      Boolean(brew.dialedAt),
-    ]),
-  ];
-  return rows
-    .map((row) =>
-      row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(","),
-    )
-    .join("\n");
 }

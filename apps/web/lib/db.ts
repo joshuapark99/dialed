@@ -114,20 +114,9 @@ function bagFromLegacyBean(bean: Bean): CoffeeBag {
   };
 }
 
-function legacyRoastLevel(
-  roastLevel: Coffee["roastLevel"],
-): Bean["roastLevel"] {
-  if (roastLevel === "medium-light") return "light";
-  if (roastLevel === "medium-dark") return "dark";
-  if (roastLevel === "unknown") return "medium";
-  return roastLevel;
-}
-
 export class DialedDatabase extends Dexie {
   coffees!: Table<Owned<Coffee>, OwnerScopedKey>;
   bags!: Table<Owned<CoffeeBag>, OwnerScopedKey>;
-  /** @deprecated Remove in Task 5 after every legacy Bean view is migrated. */
-  beans!: Table<Owned<CoffeeBag>, OwnerScopedKey>;
   machines!: Table<Owned<Machine>, OwnerScopedKey>;
   grinders!: Table<Owned<Grinder>, OwnerScopedKey>;
   brews!: Table<Owned<Brew>, OwnerScopedKey>;
@@ -221,8 +210,6 @@ export class DialedDatabase extends Dexie {
 
     this.coffees = this.table("ownedCoffees");
     this.bags = this.table("ownedBeans");
-    // Deprecated adapter: remove in Task 5 after every Bean view is migrated.
-    this.beans = this.table("ownedBeans");
     this.machines = this.table("ownedMachines");
     this.grinders = this.table("ownedGrinders");
     this.brews = this.table("ownedBrews");
@@ -269,31 +256,6 @@ export async function setOwnerPreference(
   value: string,
 ): Promise<void> {
   await db.preferences.put({ key: ownerPreferenceKey(ownerId, key), value });
-}
-
-/** @deprecated Remove in Task 5 after every legacy Bean view is migrated. */
-export async function getBeans(ownerId: string): Promise<Array<Owned<Bean>>> {
-  const [bags, coffees] = await Promise.all([
-    getCoffeeBags(ownerId),
-    getCoffees(ownerId),
-  ]);
-  const coffeesById = new Map(coffees.map((coffee) => [coffee.id, coffee]));
-
-  return bags.flatMap((bag) => {
-    const coffee = coffeesById.get(bag.coffeeId);
-    if (!coffee) return [];
-    return [
-      {
-        ownerId,
-        id: bag.id,
-        name: coffee.name,
-        roaster: coffee.roaster,
-        origin: coffee.originCountry,
-        roastLevel: legacyRoastLevel(coffee.roastLevel),
-        createdAt: bag.createdAt,
-      },
-    ];
-  });
 }
 
 export async function getCoffees(
@@ -464,15 +426,6 @@ function deletionOperation(
     action: "delete",
     createdAt: new Date().toISOString(),
   };
-}
-
-/** @deprecated Remove in Task 5 after every legacy Bean view is migrated. */
-export async function saveBean(ownerId: string, bean: Bean) {
-  await saveCoffeeWithBag(
-    ownerId,
-    coffeeFromLegacyBean(bean),
-    bagFromLegacyBean(bean),
-  );
 }
 
 export async function saveCoffeeWithBag(
@@ -743,9 +696,10 @@ function prepareRemoteOperation(
     if (remote.payload == null) {
       throw new Error("Remote upsert payload is required");
     }
-    payload = entity === "bean" && isLegacyBeanPayload(remote.payload)
-      ? parseLegacyBeanRemotePayload(remote.payload)
-      : parseRemotePayload(entity, remote.payload);
+    payload =
+      entity === "bean" && isLegacyBeanPayload(remote.payload)
+        ? parseLegacyBeanRemotePayload(remote.payload)
+        : parseRemotePayload(entity, remote.payload);
     const payloadId = isLegacyBeanPayload(payload)
       ? payload.bag.id
       : payload.id;
@@ -767,11 +721,11 @@ function tableForEntity(
       ? db.coffees
       : entity === "bean"
         ? db.bags
-      : entity === "machine"
-        ? db.machines
-        : entity === "grinder"
-          ? db.grinders
-          : db.brews;
+        : entity === "machine"
+          ? db.machines
+          : entity === "grinder"
+            ? db.grinders
+            : db.brews;
   return table as unknown as Table<OwnerScopedRecord, OwnerScopedKey>;
 }
 
