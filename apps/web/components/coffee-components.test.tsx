@@ -11,9 +11,19 @@ import {
   getOwnerPreference,
 } from "../lib/db";
 import type { Coffee, CoffeeBag } from "../lib/models";
-import { CoffeeDialog } from "./coffee-dialog";
+import {
+  activateModalLifecycle,
+  CoffeeDialog,
+  handleModalCancel,
+  selectVisibleFieldError,
+} from "./coffee-dialog";
 import { CoffeeLibrary } from "./coffee-library";
-import { Onboarding, saveOnboardingSetup } from "./onboarding";
+import {
+  Onboarding,
+  OnboardingNavigation,
+  runOnboardingSubmission,
+  saveOnboardingSetup,
+} from "./onboarding";
 
 const coffees: Coffee[] = [
   {
@@ -62,7 +72,9 @@ describe("CoffeeDialog", () => {
     expect(markup).toContain("First bag");
     expect(markup).toContain('name="originCountry"');
     expect(markup).toContain('name="startingWeightGrams"');
-    expect(markup).toContain('role="alert"');
+    expect(markup).toContain("<dialog");
+    expect(markup).not.toContain('role="alert"');
+    expect(markup).not.toContain("autofocus");
     expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>[^<]*Save coffee/);
   });
 
@@ -80,6 +92,49 @@ describe("CoffeeDialog", () => {
     expect(markup).toContain("Hualalai Kona");
     expect(markup).toContain('name="roastedOn"');
     expect(markup).not.toContain('name="originCountry"');
+  });
+
+  it("opens modally, handles Escape, closes, and restores prior focus", () => {
+    const calls: string[] = [];
+    const dialog = {
+      open: false,
+      showModal() {
+        calls.push("showModal");
+        this.open = true;
+      },
+      close() {
+        calls.push("close");
+        this.open = false;
+      },
+    };
+    const restoreTarget = { focus: () => calls.push("restoreFocus") };
+
+    const deactivate = activateModalLifecycle(dialog, restoreTarget);
+    const cancelEvent = { preventDefault: () => calls.push("preventDefault") };
+    handleModalCancel(cancelEvent, false, () => calls.push("onClose"));
+    deactivate();
+
+    expect(calls).toEqual([
+      "showModal",
+      "preventDefault",
+      "onClose",
+      "close",
+      "restoreFocus",
+    ]);
+  });
+
+  it("defers field errors until interaction and links them to the input", () => {
+    const error = {
+      scope: "coffee" as const,
+      field: "name",
+      message: "Coffee name is required",
+    };
+
+    expect(selectVisibleFieldError(error, new Set())).toBeUndefined();
+    expect(selectVisibleFieldError(error, new Set(["coffee.name"]))).toEqual({
+      ...error,
+      id: "coffee-name-error",
+    });
   });
 });
 
@@ -145,5 +200,102 @@ describe("Onboarding", () => {
     expect((await getMachines(ownerId))[0]?.name).toBe("Gaggia Classic Pro");
     expect((await getGrinders(ownerId))[0]?.name).toBe("Fellow Opus");
     expect(await getOwnerPreference(ownerId, "onboarded")).toBe("true");
+  });
+
+  it("reuses stable record IDs when a failed setup is retried", async () => {
+    const ownerId = "onboarding-retry";
+    const draft = {
+      coffeeName: "Hualalai Kona",
+      roaster: "Coffee Purveyors",
+      roast: "medium" as const,
+      roastedOn: "2026-08-12",
+      machine: "Gaggia Classic Pro",
+      temperatureControl: "none" as const,
+      grinder: "Fellow Opus",
+      finerDirection: "lower" as const,
+    };
+    const ids = {
+      coffeeId: "0198d3a4-1111-7000-8000-000000000060",
+      bagId: "0198d3a4-1111-7000-8000-000000000061",
+      machineId: "0198d3a4-1111-7000-8000-000000000062",
+      grinderId: "0198d3a4-1111-7000-8000-000000000063",
+    };
+
+    await saveOnboardingSetup(ownerId, draft, ids);
+    await saveOnboardingSetup(ownerId, draft, ids);
+
+    expect(await getCoffees(ownerId)).toHaveLength(1);
+    expect(await getCoffeeBags(ownerId)).toHaveLength(1);
+    expect(await getMachines(ownerId)).toHaveLength(1);
+    expect(await getGrinders(ownerId)).toHaveLength(1);
+  });
+
+  it("prevents duplicate submissions while setup persistence is pending", async () => {
+    const lock = { saving: false };
+    const states: Array<{ saving: boolean; error?: string }> = [];
+    let calls = 0;
+    let resolveSave: (() => void) | undefined;
+    const save = () => {
+      calls += 1;
+      return new Promise<void>((resolve) => {
+        resolveSave = resolve;
+      });
+    };
+
+    const first = runOnboardingSubmission(lock, save, (state) =>
+      states.push(state),
+    );
+    const second = runOnboardingSubmission(lock, save, (state) =>
+      states.push(state),
+    );
+
+    expect(calls).toBe(1);
+    expect(states).toEqual([{ saving: true }]);
+    resolveSave?.();
+    await Promise.all([first, second]);
+    expect(states.at(-1)).toEqual({ saving: false });
+  });
+
+  it("surfaces setup rejection and renders disabled saving navigation", async () => {
+    const states: Array<{ saving: boolean; error?: string }> = [];
+    await runOnboardingSubmission(
+      { saving: false },
+      async () => {
+        throw new Error("disk full");
+      },
+      (state) => states.push(state),
+    );
+
+    expect(states).toEqual([
+      { saving: true },
+      {
+        saving: false,
+        error: "Could not finish setup. Please try again.",
+      },
+    ]);
+
+    const savingMarkup = renderToStaticMarkup(
+      <OnboardingNavigation
+        step={2}
+        valid
+        submission={{ saving: true }}
+        onBack={() => {}}
+        onContinue={() => {}}
+      />,
+    );
+    expect(savingMarkup.match(/disabled=""/g)).toHaveLength(2);
+    expect(savingMarkup).toContain("Saving…");
+
+    const failedMarkup = renderToStaticMarkup(
+      <OnboardingNavigation
+        step={2}
+        valid
+        submission={states.at(-1)!}
+        onBack={() => {}}
+        onContinue={() => {}}
+      />,
+    );
+    expect(failedMarkup).toContain('role="alert"');
+    expect(failedMarkup).toContain("Could not finish setup. Please try again.");
   });
 });

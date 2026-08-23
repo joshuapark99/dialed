@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { ArrowRight, Coffee, Gauge, RotateCw } from "lucide-react";
 import {
   makeId,
@@ -24,9 +24,56 @@ export interface OnboardingSetupDraft {
   finerDirection: "lower" | "higher";
 }
 
+export interface OnboardingSetupIds {
+  coffeeId: string;
+  bagId: string;
+  machineId: string;
+  grinderId: string;
+}
+
+function makeOnboardingSetupIds(): OnboardingSetupIds {
+  return {
+    coffeeId: makeId(),
+    bagId: makeId(),
+    machineId: makeId(),
+    grinderId: makeId(),
+  };
+}
+
+export interface OnboardingSubmissionState {
+  saving: boolean;
+  error?: string;
+}
+
+export interface OnboardingSubmissionLock {
+  saving: boolean;
+}
+
+export async function runOnboardingSubmission(
+  lock: OnboardingSubmissionLock,
+  save: () => Promise<void>,
+  setState: (state: OnboardingSubmissionState) => void,
+): Promise<void> {
+  if (lock.saving) return;
+  lock.saving = true;
+  setState({ saving: true });
+  try {
+    await save();
+    setState({ saving: false });
+  } catch {
+    setState({
+      saving: false,
+      error: "Could not finish setup. Please try again.",
+    });
+  } finally {
+    lock.saving = false;
+  }
+}
+
 export async function saveOnboardingSetup(
   ownerId: string,
   draft: OnboardingSetupDraft,
+  ids: OnboardingSetupIds = makeOnboardingSetupIds(),
 ): Promise<void> {
   const coffeeResult = parseCoffeeForm({
     name: draft.coffeeName,
@@ -51,14 +98,18 @@ export async function saveOnboardingSetup(
   if (!bagResult.valid) throw new Error(bagResult.message);
 
   const createdAt = new Date().toISOString();
-  const coffeeId = makeId();
   await saveCoffeeWithBag(
     ownerId,
-    { id: coffeeId, ...coffeeResult.value, createdAt },
-    { id: makeId(), coffeeId, ...bagResult.value, createdAt },
+    { id: ids.coffeeId, ...coffeeResult.value, createdAt },
+    {
+      id: ids.bagId,
+      coffeeId: ids.coffeeId,
+      ...bagResult.value,
+      createdAt,
+    },
   );
   await saveMachine(ownerId, {
-    id: makeId(),
+    id: ids.machineId,
     name: draft.machine.trim(),
     temperatureControl: draft.temperatureControl,
     hasPressureControl: false,
@@ -66,7 +117,7 @@ export async function saveOnboardingSetup(
     createdAt,
   });
   await saveGrinder(ownerId, {
-    id: makeId(),
+    id: ids.grinderId,
     name: draft.grinder.trim(),
     finerDirection: draft.finerDirection,
     createdAt,
@@ -87,18 +138,32 @@ export function Onboarding({ ownerId }: { ownerId: string }) {
   const [finerDirection, setFinerDirection] = useState<"lower" | "higher">(
     "lower",
   );
+  const [submission, setSubmission] = useState<OnboardingSubmissionState>({
+    saving: false,
+  });
+  const submissionLock = useRef<OnboardingSubmissionLock>({ saving: false });
+  const setupIds = useRef<OnboardingSetupIds | undefined>(undefined);
 
-  async function finish() {
-    await saveOnboardingSetup(ownerId, {
-      coffeeName: beanName,
-      roaster,
-      roast,
-      roastedOn,
-      machine,
-      temperatureControl,
-      grinder,
-      finerDirection,
-    });
+  async function finish(): Promise<void> {
+    await runOnboardingSubmission(
+      submissionLock.current,
+      () =>
+        saveOnboardingSetup(
+          ownerId,
+          {
+            coffeeName: beanName,
+            roaster,
+            roast,
+            roastedOn,
+            machine,
+            temperatureControl,
+            grinder,
+            finerDirection,
+          },
+          (setupIds.current ??= makeOnboardingSetupIds()),
+        ),
+      setSubmission,
+    );
   }
 
   const valid =
@@ -236,26 +301,71 @@ export function Onboarding({ ownerId }: { ownerId: string }) {
           </>
         )}
       </section>
+      <OnboardingNavigation
+        step={step}
+        valid={Boolean(valid)}
+        submission={submission}
+        onBack={() => {
+          setSubmission({ saving: false });
+          setStep(step - 1);
+        }}
+        onContinue={async () => {
+          if (step < 2) {
+            setStep(step + 1);
+            return;
+          }
+          await finish();
+        }}
+      />
+    </main>
+  );
+}
+
+export function OnboardingNavigation({
+  step,
+  valid,
+  submission,
+  onBack,
+  onContinue,
+}: {
+  step: number;
+  valid: boolean;
+  submission: OnboardingSubmissionState;
+  onBack: () => void;
+  onContinue: () => void | Promise<void>;
+}) {
+  return (
+    <>
+      {submission.error && (
+        <p className="mt-6 text-sm font-semibold text-coral" role="alert">
+          {submission.error}
+        </p>
+      )}
       <div className="mt-8 flex gap-3">
         {step > 0 && (
           <button
             type="button"
             className="button-secondary flex-1"
-            onClick={() => setStep(step - 1)}
+            onClick={onBack}
+            disabled={submission.saving}
           >
             Back
           </button>
         )}
         <button
           type="button"
-          disabled={!valid}
+          disabled={!valid || submission.saving}
           className="button-primary flex-[2]"
-          onClick={() => (step < 2 ? setStep(step + 1) : void finish())}
+          onClick={onContinue}
         >
-          {step === 2 ? "Start dialing in" : "Continue"}
+          {submission.saving
+            ? "Saving…"
+            : step === 2
+              ? "Start dialing in"
+              : "Continue"}
           <ArrowRight className="h-4 w-4" />
         </button>
       </div>
-    </main>
+    </>
   );
 }
