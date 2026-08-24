@@ -20,6 +20,7 @@ import {
   getMachines,
   getOperations,
   getOwnerPreference,
+  markBrewSynced,
   OwnerTransferInProgressError,
   ownerPreferenceKey,
   removeOperations,
@@ -1076,6 +1077,83 @@ describe("owner-scoped persistence", () => {
       expect.objectContaining({ id: machineRecord.id }),
     ]);
   });
+
+  it.each([
+    [
+      "destructive discard",
+      async (_brewId: string, _operationId: string) => discardAnonymousData(),
+    ],
+    [
+      "owner preference writes",
+      async (_brewId: string, _operationId: string) =>
+        setOwnerPreference(ANONYMOUS_OWNER_ID, "late-preference", "blocked"),
+    ],
+    [
+      "operation removal",
+      async (_brewId: string, operationId: string) =>
+        removeOperations(ANONYMOUS_OWNER_ID, [operationId]),
+    ],
+    [
+      "brew sync-state mutation",
+      async (brewId: string, _operationId: string) =>
+        markBrewSynced(ANONYMOUS_OWNER_ID, brewId),
+    ],
+    [
+      "operation acknowledgement",
+      async (_brewId: string, operationId: string) =>
+        acknowledgeOperations(ANONYMOUS_OWNER_ID, [operationId]),
+    ],
+  ])(
+    "freezes anonymous %s through the source-marker guard",
+    async (_name, mutate) => {
+      const brewId = "0198d3a4-1111-7000-8000-000000000115";
+      const operationId = "0198d3a4-1111-7000-8000-000000000116";
+      await db.brews.add({
+        ...brew(brewId, "0198d3a4-1111-7000-8000-000000000117"),
+        ownerId: ANONYMOUS_OWNER_ID,
+      });
+      await db.operations.add({
+        ownerId: ANONYMOUS_OWNER_ID,
+        operationId,
+        entity: "brew",
+        entityId: brewId,
+        action: "upsert",
+        payload: {
+          ...brew(brewId, "0198d3a4-1111-7000-8000-000000000117"),
+        },
+        createdAt: "2026-08-23T12:00:00.000Z",
+      });
+      await db.preferences.put({
+        key: ownerPreferenceKey(
+          ANONYMOUS_OWNER_ID,
+          "anonymous-transfer-source",
+        ),
+        value: alice,
+      });
+
+      await expect(mutate(brewId, operationId)).rejects.toBeInstanceOf(
+        OwnerTransferInProgressError,
+      );
+
+      expect(await getBrews(ANONYMOUS_OWNER_ID)).toEqual([
+        expect.objectContaining({ id: brewId, syncState: "local" }),
+      ]);
+      expect(
+        (await getOperations(ANONYMOUS_OWNER_ID)).map(
+          (operation) => operation.operationId,
+        ),
+      ).toEqual([operationId]);
+      expect(
+        await getOwnerPreference(
+          ANONYMOUS_OWNER_ID,
+          "anonymous-transfer-source",
+        ),
+      ).toBe(alice);
+      expect(
+        await getOwnerPreference(ANONYMOUS_OWNER_ID, "late-preference"),
+      ).toBeUndefined();
+    },
+  );
 
   it("does not let a stale cache reset remove a deleted-owner tombstone", async () => {
     await clearDeletedAccountData(alice);

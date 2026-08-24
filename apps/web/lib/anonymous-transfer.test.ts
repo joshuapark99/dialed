@@ -6,6 +6,7 @@ import {
   ANONYMOUS_OWNER_ID,
   acknowledgeOperations,
   db,
+  discardAnonymousData,
   getBrews,
   getCoffeeBags,
   getCoffees,
@@ -36,6 +37,8 @@ const coffeeId = "0198d3a4-1111-7000-8000-000000000001";
 const bagId = "0198d3a4-1111-7000-8000-000000000002";
 const machineId = "0198d3a4-1111-7000-8000-000000000003";
 const grinderId = "0198d3a4-1111-7000-8000-000000000004";
+const inconsistentStateMessage =
+  "Anonymous transfer state is inconsistent; local data was preserved";
 
 function coffee(): Coffee {
   return {
@@ -127,6 +130,39 @@ async function getJournal(
   return value === undefined
     ? undefined
     : (JSON.parse(value) as AnonymousTransferJournal);
+}
+
+function validJournal(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    version: 1,
+    destinationOwnerId: "account:alice",
+    phase: "staged",
+    operationIds: ["operation-1"],
+    acknowledgedOperationIds: ["operation-1"],
+    startedAt: "2026-08-23T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+async function putRawTransferState(
+  journal: string | Record<string, unknown>,
+  sourceDestinationOwnerId: string | null = "account:alice",
+): Promise<void> {
+  await db.preferences.put({
+    key: ownerPreferenceKey("account:alice", "anonymous-transfer-journal"),
+    value: typeof journal === "string" ? journal : JSON.stringify(journal),
+  });
+  if (sourceDestinationOwnerId !== null) {
+    await db.preferences.put({
+      key: ownerPreferenceKey(
+        ANONYMOUS_OWNER_ID,
+        ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+      ),
+      value: sourceDestinationOwnerId,
+    });
+  }
 }
 
 beforeEach(async () => {
@@ -479,6 +515,25 @@ describe("anonymous transfer staging", () => {
     ).toBeUndefined();
   });
 
+  it("preserves legacyPairedCoffee in the copied bag and queued payload", async () => {
+    await addValidAnonymousGraph();
+    await db.bags.update([ANONYMOUS_OWNER_ID, bagId], {
+      legacyPairedCoffee: true,
+    });
+
+    await stageAnonymousTransfer("account:alice");
+
+    expect((await getCoffeeBags("account:alice"))[0]).toMatchObject({
+      id: bagId,
+      legacyPairedCoffee: true,
+    });
+    expect(
+      (await getOperations("account:alice")).find(
+        ({ entity, entityId }) => entity === "bean" && entityId === bagId,
+      )?.payload,
+    ).toMatchObject({ legacyPairedCoffee: true });
+  });
+
   it("rolls back every destination write and marker when operation insertion fails", async () => {
     await addValidAnonymousGraph();
     vi.spyOn(db.operations, "add").mockRejectedValueOnce(
@@ -585,6 +640,28 @@ describe("anonymous transfer acknowledgement and cleanup", () => {
     ).toContain(operationId);
   });
 
+  it("keeps ordinary destination acknowledgement writable during another account's transfer", async () => {
+    await addValidAnonymousGraph();
+    await stageAnonymousTransfer("account:alice");
+    const bobOperationId = "0198d3a4-1111-7000-8000-000000000040";
+    await db.operations.add({
+      ownerId: "account:bob",
+      operationId: bobOperationId,
+      entity: "machine",
+      entityId: machineId,
+      action: "upsert",
+      payload: { ...machine() },
+      createdAt,
+    });
+
+    await acknowledgeOperations("account:bob", [bobOperationId]);
+
+    expect(await getOperations("account:bob")).toEqual([]);
+    expect(await getAnonymousTransferSummary()).toMatchObject({
+      hasData: true,
+    });
+  });
+
   it("refuses cleanup without explicit acknowledgement evidence even if operations were removed", async () => {
     await addValidAnonymousGraph();
     const journal = await stageAnonymousTransfer("account:alice");
@@ -643,6 +720,157 @@ describe("anonymous transfer acknowledgement and cleanup", () => {
     expect(await getMachines("account:bob")).toHaveLength(1);
   });
 
+  it("fails closed when an acknowledged journal loses its source binding before new anonymous data appears", async () => {
+    await addValidAnonymousGraph();
+    const journal = await stageAnonymousTransfer("account:alice");
+    await acknowledgeOperations("account:alice", journal.operationIds);
+    await db.preferences.delete(
+      ownerPreferenceKey(
+        ANONYMOUS_OWNER_ID,
+        ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+      ),
+    );
+    await Promise.all([
+      db.coffees.where("ownerId").equals(ANONYMOUS_OWNER_ID).delete(),
+      db.bags.where("ownerId").equals(ANONYMOUS_OWNER_ID).delete(),
+      db.machines.where("ownerId").equals(ANONYMOUS_OWNER_ID).delete(),
+      db.grinders.where("ownerId").equals(ANONYMOUS_OWNER_ID).delete(),
+      db.brews.where("ownerId").equals(ANONYMOUS_OWNER_ID).delete(),
+    ]);
+    const newAnonymousMachine = {
+      ...machine(),
+      id: "0198d3a4-1111-7000-8000-000000000041",
+      name: "Created after stale transfer",
+      ownerId: ANONYMOUS_OWNER_ID,
+    };
+    await db.machines.add(newAnonymousMachine);
+
+    await expect(completeAnonymousTransfer("account:alice")).rejects.toThrow(
+      inconsistentStateMessage,
+    );
+
+    expect(await getMachines(ANONYMOUS_OWNER_ID)).toEqual([
+      newAnonymousMachine,
+    ]);
+    expect(await getJournal("account:alice")).toMatchObject({
+      acknowledgedOperationIds: journal.operationIds,
+    });
+  });
+
+  it("prevents destructive anonymous discard during an acknowledged transfer", async () => {
+    await addValidAnonymousGraph();
+    const journal = await stageAnonymousTransfer("account:alice");
+    await acknowledgeOperations("account:alice", journal.operationIds);
+
+    await expect(discardAnonymousData()).rejects.toThrow(
+      "Anonymous data is being transferred to account:alice",
+    );
+
+    expect(await getAnonymousTransferSummary()).toMatchObject({
+      hasData: true,
+    });
+    expect(
+      await getOwnerPreference(
+        ANONYMOUS_OWNER_ID,
+        ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+      ),
+    ).toBe("account:alice");
+  });
+
+  it.each([
+    ["invalid JSON", "{"],
+    ["wrong version", validJournal({ version: 2 })],
+    ["wrong phase", validJournal({ phase: "completed" })],
+    [
+      "destination namespace mismatch",
+      validJournal({ destinationOwnerId: "account:bob" }),
+    ],
+    ["empty operation ID", validJournal({ operationIds: [""] })],
+    [
+      "non-string operation ID",
+      validJournal({ operationIds: [1], acknowledgedOperationIds: [1] }),
+    ],
+    [
+      "duplicate operation IDs",
+      validJournal({
+        operationIds: ["operation-1", "operation-1"],
+        acknowledgedOperationIds: ["operation-1"],
+      }),
+    ],
+    [
+      "duplicate acknowledgements",
+      validJournal({
+        acknowledgedOperationIds: ["operation-1", "operation-1"],
+      }),
+    ],
+    [
+      "acknowledgement outside the operation set",
+      validJournal({ acknowledgedOperationIds: ["operation-2"] }),
+    ],
+    ["invalid start time", validJournal({ startedAt: "not-a-time" })],
+    ["unexpected journal fields", { ...validJournal(), extra: true }],
+  ])("fails closed for a journal with %s", async (_case, rawJournal) => {
+    await addValidAnonymousGraph();
+    await putRawTransferState(rawJournal);
+
+    await expect(completeAnonymousTransfer("account:alice")).rejects.toThrow(
+      inconsistentStateMessage,
+    );
+
+    expect(await getAnonymousTransferSummary()).toMatchObject({
+      hasData: true,
+    });
+    expect(
+      await getOwnerPreference("account:alice", "anonymous-transfer-journal"),
+    ).toBeDefined();
+  });
+
+  it.each([
+    ["missing", null],
+    ["bound to another destination", "account:bob"],
+  ])("fails closed when the source marker is %s", async (_case, marker) => {
+    await addValidAnonymousGraph();
+    await putRawTransferState(validJournal(), marker);
+
+    await expect(completeAnonymousTransfer("account:alice")).rejects.toThrow(
+      inconsistentStateMessage,
+    );
+
+    expect(await getAnonymousTransferSummary()).toMatchObject({
+      hasData: true,
+    });
+  });
+
+  it("uses the strict journal boundary before staging reuses existing state", async () => {
+    await addValidAnonymousGraph();
+    await putRawTransferState(validJournal({ operationIds: [""] }));
+
+    await expect(stageAnonymousTransfer("account:alice")).rejects.toThrow(
+      inconsistentStateMessage,
+    );
+
+    expect(await getOperations("account:alice")).toEqual([]);
+  });
+
+  it("uses the strict journal boundary before acknowledgement removes operations", async () => {
+    await addValidAnonymousGraph();
+    const journal = await stageAnonymousTransfer("account:alice");
+    await db.preferences.put({
+      key: ownerPreferenceKey("account:alice", "anonymous-transfer-journal"),
+      value: "{",
+    });
+
+    await expect(
+      acknowledgeOperations("account:alice", [journal.operationIds[0]!]),
+    ).rejects.toThrow(inconsistentStateMessage);
+
+    expect(
+      (await getOperations("account:alice")).map(
+        ({ operationId }) => operationId,
+      ),
+    ).toContain(journal.operationIds[0]);
+  });
+
   it("defers only before staging and leaves transfer data unchanged", async () => {
     await addValidAnonymousGraph();
 
@@ -658,5 +886,40 @@ describe("anonymous transfer acknowledgement and cleanup", () => {
     await expect(deferAnonymousTransfer("account:alice")).rejects.toThrow(
       "Anonymous transfer is already active for account:alice",
     );
+  });
+
+  it("rejects anonymous and cross-destination defer while the global source marker is active", async () => {
+    await addValidAnonymousGraph();
+
+    await expect(completeAnonymousTransfer(ANONYMOUS_OWNER_ID)).rejects.toThrow(
+      "Anonymous data cannot be transferred to anonymous",
+    );
+    await expect(deferAnonymousTransfer(ANONYMOUS_OWNER_ID)).rejects.toThrow(
+      "Anonymous data cannot be transferred to anonymous",
+    );
+    const stage = stageAnonymousTransfer("account:alice");
+    const defer = deferAnonymousTransfer("account:bob");
+    await expect(stage).resolves.toMatchObject({
+      destinationOwnerId: "account:alice",
+    });
+    await expect(defer).rejects.toThrow(
+      "Anonymous transfer is already active for account:alice",
+    );
+    expect(
+      await getOwnerPreference("account:bob", "anonymous-transfer-dismissed"),
+    ).toBeUndefined();
+  });
+
+  it("uses the strict journal boundary before defer accepts orphaned state", async () => {
+    await addValidAnonymousGraph();
+    await putRawTransferState(validJournal(), null);
+
+    await expect(deferAnonymousTransfer("account:alice")).rejects.toThrow(
+      inconsistentStateMessage,
+    );
+
+    expect(
+      await getOwnerPreference("account:alice", "anonymous-transfer-dismissed"),
+    ).toBeUndefined();
   });
 });

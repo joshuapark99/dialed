@@ -17,10 +17,23 @@ import type {
   SyncOperation,
 } from "./models";
 import { parseRemotePayload } from "./sync-payloads";
+import {
+  ANONYMOUS_TRANSFER_DISMISSED_KEY,
+  ANONYMOUS_TRANSFER_JOURNAL_KEY,
+  ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+  type AnonymousTransferJournal,
+  AnonymousTransferStateError,
+  parseBoundAnonymousTransferJournal,
+} from "./anonymous-transfer-state";
 
-export const ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY = "anonymous-transfer-source";
-const activeJournalKey = "anonymous-transfer-journal";
-const dismissedKey = "anonymous-transfer-dismissed";
+export {
+  ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+  AnonymousTransferStateError,
+} from "./anonymous-transfer-state";
+export type { AnonymousTransferJournal } from "./anonymous-transfer-state";
+
+const activeJournalKey = ANONYMOUS_TRANSFER_JOURNAL_KEY;
+const dismissedKey = ANONYMOUS_TRANSFER_DISMISSED_KEY;
 const transferablePreferenceKeys = new Set(["onboarded"]);
 
 export interface AnonymousTransferSummary {
@@ -30,15 +43,6 @@ export interface AnonymousTransferSummary {
   grinders: number;
   brews: number;
   hasData: boolean;
-}
-
-export interface AnonymousTransferJournal {
-  version: 1;
-  destinationOwnerId: string;
-  phase: "staged";
-  operationIds: string[];
-  acknowledgedOperationIds: string[];
-  startedAt: string;
 }
 
 type DeepReadonly<T> = T extends object
@@ -269,26 +273,59 @@ function semanticRecord(record: TransferRecord, entity: SyncEntity): string {
   return JSON.stringify(stableValue(content));
 }
 
-function parseJournal(value: string): AnonymousTransferJournal {
-  const journal = JSON.parse(value) as AnonymousTransferJournal;
-  if (
-    journal.version !== 1 ||
-    journal.phase !== "staged" ||
-    typeof journal.destinationOwnerId !== "string" ||
-    !Array.isArray(journal.operationIds) ||
-    !Array.isArray(journal.acknowledgedOperationIds) ||
-    typeof journal.startedAt !== "string"
-  ) {
-    throw new Error("Anonymous transfer journal is malformed");
-  }
-  return journal;
+interface ActiveAnonymousTransfer {
+  destinationOwnerId: string;
+  journal: AnonymousTransferJournal;
 }
 
-async function readJournal(
-  destinationOwnerId: string,
-): Promise<AnonymousTransferJournal | undefined> {
-  const value = await getOwnerPreference(destinationOwnerId, activeJournalKey);
-  return value === undefined ? undefined : parseJournal(value);
+function journalPreferenceOwnerId(key: string): string | undefined {
+  const lengthSeparator = key.indexOf(":");
+  if (lengthSeparator <= 0) return undefined;
+  const ownerLength = Number(key.slice(0, lengthSeparator));
+  if (!Number.isInteger(ownerLength) || ownerLength <= 0) return undefined;
+  const ownerStart = lengthSeparator + 1;
+  const ownerEnd = ownerStart + ownerLength;
+  if (key[ownerEnd] !== ":" || key.slice(ownerEnd + 1) !== activeJournalKey) {
+    return undefined;
+  }
+  return key.slice(ownerStart, ownerEnd);
+}
+
+async function readActiveAnonymousTransfer(): Promise<
+  ActiveAnonymousTransfer | undefined
+> {
+  const [sourceDestinationOwnerId, preferences] = await Promise.all([
+    getOwnerPreference(
+      ANONYMOUS_OWNER_ID,
+      ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+    ),
+    db.preferences.toArray(),
+  ]);
+  const journalPreferences = preferences.filter(({ key }) =>
+    key.endsWith(`:${activeJournalKey}`),
+  );
+  if (journalPreferences.length === 0) {
+    if (sourceDestinationOwnerId !== undefined) {
+      throw new AnonymousTransferStateError();
+    }
+    return undefined;
+  }
+  if (journalPreferences.length !== 1) {
+    throw new AnonymousTransferStateError();
+  }
+  const journalPreference = journalPreferences[0]!;
+  const destinationOwnerId = journalPreferenceOwnerId(journalPreference.key);
+  if (destinationOwnerId === undefined) {
+    throw new AnonymousTransferStateError();
+  }
+  return {
+    destinationOwnerId,
+    journal: parseBoundAnonymousTransferJournal(
+      journalPreference.value,
+      destinationOwnerId,
+      sourceDestinationOwnerId,
+    ),
+  };
 }
 
 function pendingCopies<T extends TransferRecord>(
@@ -350,19 +387,13 @@ export async function stageAnonymousTransfer(
       db.operations,
     ],
     async () => {
-      const existingJournal = await readJournal(destinationOwnerId);
-      if (existingJournal) return existingJournal;
-
-      const sourceDestinationOwnerId = await getOwnerPreference(
-        ANONYMOUS_OWNER_ID,
-        ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
-      );
-      if (
-        sourceDestinationOwnerId !== undefined &&
-        sourceDestinationOwnerId !== destinationOwnerId
-      ) {
+      const activeTransfer = await readActiveAnonymousTransfer();
+      if (activeTransfer?.destinationOwnerId === destinationOwnerId) {
+        return activeTransfer.journal;
+      }
+      if (activeTransfer) {
         throw new Error(
-          `Anonymous transfer is already staged for ${sourceDestinationOwnerId}`,
+          `Anonymous transfer is already staged for ${activeTransfer.destinationOwnerId}`,
         );
       }
 
@@ -488,6 +519,9 @@ function ownerPreferencePrefix(ownerId: string): string {
 export async function completeAnonymousTransfer(
   destinationOwnerId: string,
 ): Promise<{ completed: boolean; pendingCount: number }> {
+  if (destinationOwnerId === ANONYMOUS_OWNER_ID) {
+    throw new Error("Anonymous data cannot be transferred to anonymous");
+  }
   return db.transaction(
     "rw",
     [
@@ -500,17 +534,14 @@ export async function completeAnonymousTransfer(
       db.operations,
     ],
     async () => {
-      const journal = await readJournal(destinationOwnerId);
-      if (!journal) {
-        const sourceDestinationOwnerId = await getOwnerPreference(
-          ANONYMOUS_OWNER_ID,
-          ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
-        );
-        if (sourceDestinationOwnerId === undefined) {
-          return { completed: true as const, pendingCount: 0 };
-        }
-        throw new Error("Anonymous transfer journal is missing");
+      const activeTransfer = await readActiveAnonymousTransfer();
+      if (!activeTransfer) {
+        return { completed: true as const, pendingCount: 0 };
       }
+      if (activeTransfer.destinationOwnerId !== destinationOwnerId) {
+        throw new AnonymousTransferStateError();
+      }
+      const { journal } = activeTransfer;
       const acknowledged = new Set(journal.acknowledgedOperationIds);
       const pendingCount = journal.operationIds.filter(
         (operationId) => !acknowledged.has(operationId),
@@ -543,10 +574,14 @@ export async function completeAnonymousTransfer(
 export async function deferAnonymousTransfer(
   destinationOwnerId: string,
 ): Promise<void> {
+  if (destinationOwnerId === ANONYMOUS_OWNER_ID) {
+    throw new Error("Anonymous data cannot be transferred to anonymous");
+  }
   await db.transaction("rw", db.preferences, async () => {
-    if (await readJournal(destinationOwnerId)) {
+    const activeTransfer = await readActiveAnonymousTransfer();
+    if (activeTransfer) {
       throw new Error(
-        `Anonymous transfer is already active for ${destinationOwnerId}`,
+        `Anonymous transfer is already active for ${activeTransfer.destinationOwnerId}`,
       );
     }
     await db.preferences.put({

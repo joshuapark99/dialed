@@ -20,6 +20,12 @@ import {
   type LegacyBeanRemotePayload,
   type RemotePayload,
 } from "./sync-payloads";
+import {
+  ANONYMOUS_TRANSFER_JOURNAL_KEY,
+  ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+  AnonymousTransferStateError,
+  parseBoundAnonymousTransferJournal,
+} from "./anonymous-transfer-state";
 
 export { ANONYMOUS_OWNER_ID } from "./models";
 
@@ -49,8 +55,6 @@ export class OwnerTransferInProgressError extends Error {
 
 type OwnerScopedKey = [ownerId: string, localId: string];
 const deletedOwnerMarkerKey = "deleted-owner";
-const anonymousTransferSourceMarkerKey = "anonymous-transfer-source";
-const anonymousTransferJournalKey = "anonymous-transfer-journal";
 
 const legacyStores = {
   beans: "id, ownerId, [ownerId+createdAt], name, roaster, createdAt",
@@ -268,7 +272,10 @@ export async function setOwnerPreference(
   key: string,
   value: string,
 ): Promise<void> {
-  await db.preferences.put({ key: ownerPreferenceKey(ownerId, key), value });
+  await db.transaction("rw", db.preferences, async () => {
+    await assertOwnerWritable(ownerId);
+    await db.preferences.put({ key: ownerPreferenceKey(ownerId, key), value });
+  });
 }
 
 export async function getCoffees(
@@ -363,6 +370,7 @@ async function deleteOwnerRecords(ownerId: string): Promise<void> {
 async function destructivelyClearOwnerData(
   ownerId: string,
   markDeleted: boolean,
+  requireWritableOwner = false,
 ): Promise<{ cleared: true }> {
   return db.transaction(
     "rw",
@@ -376,6 +384,7 @@ async function destructivelyClearOwnerData(
       db.operations,
     ],
     async () => {
+      if (requireWritableOwner) await assertOwnerWritable(ownerId);
       await deleteOwnerRecords(ownerId);
       if (markDeleted) {
         await db.preferences.put({
@@ -389,7 +398,7 @@ async function destructivelyClearOwnerData(
 }
 
 export async function discardAnonymousData(): Promise<{ cleared: true }> {
-  return destructivelyClearOwnerData(ANONYMOUS_OWNER_ID, false);
+  return destructivelyClearOwnerData(ANONYMOUS_OWNER_ID, false, true);
 }
 
 export async function clearDeletedAccountData(
@@ -404,7 +413,7 @@ export async function clearDeletedAccountData(
 async function assertOwnerWritable(ownerId: string): Promise<void> {
   if (ownerId === ANONYMOUS_OWNER_ID) {
     const transfer = await db.preferences.get(
-      ownerPreferenceKey(ownerId, anonymousTransferSourceMarkerKey),
+      ownerPreferenceKey(ownerId, ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY),
     );
     if (transfer) throw new OwnerTransferInProgressError(transfer.value);
   }
@@ -605,7 +614,8 @@ export async function removeOperations(
   ownerId: string,
   operationIds: string[],
 ): Promise<void> {
-  await db.transaction("rw", db.operations, async () => {
+  await db.transaction("rw", [db.operations, db.preferences], async () => {
+    await assertOwnerWritable(ownerId);
     const ownedIds = (
       await db.operations.where("ownerId").equals(ownerId).toArray()
     )
@@ -621,7 +631,8 @@ export async function markBrewSynced(
   ownerId: string,
   brewId: string,
 ): Promise<boolean> {
-  return db.transaction("rw", db.brews, async () => {
+  return db.transaction("rw", [db.brews, db.preferences], async () => {
+    await assertOwnerWritable(ownerId);
     const key = ownerKey(ownerId, brewId);
     const brew = await db.brews.get(key);
     if (!brew) return false;
@@ -640,16 +651,26 @@ export async function acknowledgeOperations(
     "rw",
     [db.operations, db.brews, db.preferences],
     async () => {
+      await assertOwnerWritable(ownerId);
       const journalPreferenceKey = ownerPreferenceKey(
         ownerId,
-        anonymousTransferJournalKey,
+        ANONYMOUS_TRANSFER_JOURNAL_KEY,
       );
-      const journalPreference = await db.preferences.get(journalPreferenceKey);
+      const [journalPreference, sourceDestinationOwnerId] = await Promise.all([
+        db.preferences.get(journalPreferenceKey),
+        db.preferences.get(
+          ownerPreferenceKey(
+            ANONYMOUS_OWNER_ID,
+            ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+          ),
+        ),
+      ]);
       if (journalPreference) {
-        const journal = JSON.parse(journalPreference.value) as {
-          operationIds: string[];
-          acknowledgedOperationIds: string[];
-        };
+        const journal = parseBoundAnonymousTransferJournal(
+          journalPreference.value,
+          ownerId,
+          sourceDestinationOwnerId?.value,
+        );
         const transferOperationIds = new Set(journal.operationIds);
         const acknowledgedOperationIds = new Set(
           journal.acknowledgedOperationIds,
@@ -666,6 +687,8 @@ export async function acknowledgeOperations(
             acknowledgedOperationIds: [...acknowledgedOperationIds],
           }),
         });
+      } else if (sourceDestinationOwnerId?.value === ownerId) {
+        throw new AnonymousTransferStateError();
       }
 
       const acknowledged: Array<Owned<SyncOperation>> = [];
