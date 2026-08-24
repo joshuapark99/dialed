@@ -34,6 +34,7 @@ export interface Coffee {
 export interface CoffeeBag {
   id: string;
   coffeeId: string;
+  legacyPairedCoffee?: true;
   roastedOn?: string;
   purchasedOn?: string;
   openedOn?: string;

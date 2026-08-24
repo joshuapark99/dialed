@@ -11,7 +11,6 @@ export const syncEntitySchema = z.enum([
 const remoteEntityIdSchema = z.uuidv7();
 const timestampSchema = z.string().datetime({ offset: true });
 const requiredTextSchema = z.string().trim().min(1);
-const optionalTextSchema = requiredTextSchema.optional();
 const finitePositiveSchema = z.number().finite().positive();
 const roastLevelPayloadSchema = z.enum([
   "light",
@@ -36,16 +35,16 @@ const legacyBeanPayloadSchema = z
 const coffeePayloadSchema = z
   .object({
     id: remoteEntityIdSchema,
-    name: requiredTextSchema,
-    roaster: requiredTextSchema,
-    originCountry: requiredTextSchema.optional(),
-    originRegion: requiredTextSchema.optional(),
-    producer: requiredTextSchema.optional(),
-    process: requiredTextSchema.optional(),
-    varietal: requiredTextSchema.optional(),
+    name: requiredTextSchema.max(120),
+    roaster: requiredTextSchema.max(120),
+    originCountry: requiredTextSchema.max(120).optional(),
+    originRegion: requiredTextSchema.max(120).optional(),
+    producer: requiredTextSchema.max(240).optional(),
+    process: requiredTextSchema.max(120).optional(),
+    varietal: requiredTextSchema.max(240).optional(),
     elevationMeters: z.number().int().min(1).max(9000).optional(),
     roastLevel: roastLevelPayloadSchema,
-    notes: optionalTextSchema,
+    notes: requiredTextSchema.max(2_000).optional(),
     createdAt: timestampSchema,
   })
   .strict();
@@ -54,11 +53,12 @@ const coffeeBagPayloadSchema = z
   .object({
     id: remoteEntityIdSchema,
     coffeeId: remoteEntityIdSchema,
+    legacyPairedCoffee: z.literal(true).optional(),
     roastedOn: z.string().date().optional(),
     purchasedOn: z.string().date().optional(),
     openedOn: z.string().date().optional(),
     startingWeightGrams: z.number().finite().positive().max(100_000).optional(),
-    notes: optionalTextSchema,
+    notes: requiredTextSchema.max(2_000).optional(),
     createdAt: timestampSchema,
   })
   .strict();

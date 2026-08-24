@@ -61,6 +61,7 @@ export const CoffeeBagSchema = z
   .object({
     id: EntityIdSchema,
     coffeeId: EntityIdSchema,
+    legacyPairedCoffee: z.literal(true).optional(),
     roastedOn: z.string().date().optional(),
     purchasedOn: z.string().date().optional(),
     openedOn: z.string().date().optional(),

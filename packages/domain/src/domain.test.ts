@@ -140,6 +140,15 @@ describe("schemas", () => {
     });
   });
 
+  it("accepts only the explicit true legacy-pair discriminator", () => {
+    expect(
+      CoffeeBagSchema.parse({ ...validBag, legacyPairedCoffee: true }),
+    ).toMatchObject({ legacyPairedCoffee: true });
+    expect(() =>
+      CoffeeBagSchema.parse({ ...validBag, legacyPairedCoffee: false }),
+    ).toThrow();
+  });
+
   it("accepts the minimum local coffee and bag contracts", () => {
     expect(
       CoffeeSchema.parse({

@@ -185,10 +185,53 @@ describe("parseRemotePayload", () => {
   it("parses current Coffee and bag payloads and normalizes a legacy bean", () => {
     expect(parseRemotePayload("coffee", coffee())).toEqual(coffee());
     expect(parseRemotePayload("bean", bag())).toEqual(bag());
+    expect(
+      parseRemotePayload("bean", { ...bag(), legacyPairedCoffee: true }),
+    ).toEqual({ ...bag(), legacyPairedCoffee: true });
     expect(parseRemotePayload("bean", legacyBean())).toMatchObject({
       kind: "legacy-bean",
       coffee: expect.objectContaining({ id: ids.bean }),
-      bag: expect.objectContaining({ id: ids.bean, coffeeId: ids.bean }),
+      bag: expect.objectContaining({
+        id: ids.bean,
+        coffeeId: ids.bean,
+        legacyPairedCoffee: true,
+      }),
+    });
+  });
+
+  it.each([
+    ["name", 121],
+    ["roaster", 121],
+    ["originCountry", 121],
+    ["originRegion", 121],
+    ["producer", 241],
+    ["process", 121],
+    ["varietal", 241],
+    ["notes", 2_001],
+  ] as const)("rejects an oversized current Coffee %s", (field, length) => {
+    expect(() =>
+      parseRemotePayload("coffee", {
+        ...coffee(),
+        [field]: "x".repeat(length),
+      }),
+    ).toThrow();
+  });
+
+  it("rejects oversized current bag notes but keeps oversized legacy beans readable", () => {
+    expect(() =>
+      parseRemotePayload("bean", { ...bag(), notes: "x".repeat(2_001) }),
+    ).toThrow();
+
+    expect(
+      parseRemotePayload("bean", {
+        ...legacyBean(),
+        name: "n".repeat(121),
+        roaster: "r".repeat(121),
+        origin: "o".repeat(241),
+      }),
+    ).toMatchObject({
+      kind: "legacy-bean",
+      bag: { legacyPairedCoffee: true },
     });
   });
 
@@ -283,7 +326,11 @@ describe("applyRemoteOperation", () => {
       expect.objectContaining({ id: ids.bean, name: legacyBean().name }),
     ]);
     expect(await db.bags.where("ownerId").equals(alice).toArray()).toEqual([
-      expect.objectContaining({ id: ids.bean, coffeeId: ids.bean }),
+      expect.objectContaining({
+        id: ids.bean,
+        coffeeId: ids.bean,
+        legacyPairedCoffee: true,
+      }),
     ]);
   });
 
@@ -385,6 +432,7 @@ describe("applyRemoteOperation", () => {
     expect(await db.bags.get([alice, ids.bean])).toEqual({
       id: ids.bean,
       coffeeId: ids.bean,
+      legacyPairedCoffee: true,
       createdAt,
       ownerId: alice,
     });
@@ -425,6 +473,32 @@ describe("applyRemoteOperation", () => {
     });
 
     expect(await db.coffees.get([alice, ids.bean])).toBeUndefined();
+    expect(await db.bags.get([alice, ids.bean])).toBeUndefined();
+  });
+
+  it("keeps a current same-ID Coffee when its unmarked bag is deleted", async () => {
+    await applyRemoteOperation(alice, {
+      entity: "coffee",
+      entityId: ids.bean,
+      action: "upsert",
+      payload: coffee(ids.bean),
+    });
+    await applyRemoteOperation(alice, {
+      entity: "bean",
+      entityId: ids.bean,
+      action: "upsert",
+      payload: bag(ids.bean, ids.bean),
+    });
+
+    await applyRemoteOperation(alice, {
+      entity: "bean",
+      entityId: ids.bean,
+      action: "delete",
+    });
+
+    expect(await db.coffees.get([alice, ids.bean])).toMatchObject({
+      id: ids.bean,
+    });
     expect(await db.bags.get([alice, ids.bean])).toBeUndefined();
   });
 

@@ -5,13 +5,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   acknowledgeOperations as acknowledgeStoredOperations,
   applyRemotePage as applyStoredRemotePage,
+  clearOwnerData,
   db,
   getBrews,
+  getCoffeeBags,
+  getCoffees,
   getOperations as getStoredOperations,
   getOwnerPreference,
   saveBrew,
+  saveCoffeeWithBag,
 } from "./db";
-import type { Brew, Owned, SyncOperation } from "./models";
+import type { Brew, Coffee, CoffeeBag, Owned, SyncOperation } from "./models";
 import {
   AccountMismatchError,
   AuthenticationExpiredError,
@@ -747,6 +751,108 @@ describe("owner-aware synchronization", () => {
         syncState: "synced",
       });
       expect(await getStoredOperations(alice)).toEqual([]);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("round-trips a Coffee and marked bag through the real sync coordinator and storage", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const coffee: Coffee = {
+        id: "0198d3a4-1111-7000-8000-000000000216",
+        name: "Hualalai Kona",
+        roaster: "Coffee Purveyors",
+        roastLevel: "medium-light",
+        createdAt,
+      };
+      const bag: CoffeeBag = {
+        id: "0198d3a4-1111-7000-8000-000000000217",
+        coffeeId: coffee.id,
+        roastedOn: "2026-08-15",
+        legacyPairedCoffee: true,
+        createdAt,
+      };
+      const remoteLedger: Array<
+        Record<string, unknown> & { revision: number }
+      > = [];
+      const fetch = vi.fn(
+        async (
+          input: string | URL | Request,
+          init?: RequestInit,
+        ): Promise<Response> => {
+          const url = String(input);
+          if (url === "/api/v1/me")
+            return response(200, { user: aliceAccount });
+          if (url === "/api/v1/sync/push") {
+            const body = JSON.parse(String(init?.body)) as {
+              operations: Array<Record<string, unknown>>;
+            };
+            const results = body.operations.map((operation) => {
+              const revision = remoteLedger.length + 1;
+              remoteLedger.push({ ...operation, revision });
+              return {
+                operationId: operation.operationId,
+                revision,
+                duplicate: false,
+              };
+            });
+            return response(200, { results });
+          }
+
+          const cursor = Number(
+            new URL(url, "http://dialed.test").searchParams.get("cursor"),
+          );
+          const operations = remoteLedger.filter(
+            (operation) => operation.revision > cursor,
+          );
+          return response(200, {
+            operations,
+            cursor: operations.at(-1)?.revision ?? cursor,
+            hasMore: false,
+          });
+        },
+      );
+      const sync = createSynchronizer(
+        dependencies({
+          fetch,
+          getOperations: getStoredOperations,
+          acknowledgeOperations: acknowledgeStoredOperations,
+          getPreference: getOwnerPreference,
+          applyRemotePage: applyStoredRemotePage,
+        }),
+      );
+
+      await saveCoffeeWithBag(alice, coffee, bag);
+      await sync(alice);
+      expect(remoteLedger.map((operation) => operation.entity)).toEqual([
+        "coffee",
+        "bean",
+      ]);
+      expect(remoteLedger[1]?.payload).toMatchObject({
+        coffeeId: coffee.id,
+        legacyPairedCoffee: true,
+      });
+
+      await expect(clearOwnerData(alice)).resolves.toEqual({ cleared: true });
+      expect(await getCoffees(alice)).toEqual([]);
+      expect(await getCoffeeBags(alice)).toEqual([]);
+
+      await sync(alice);
+
+      expect(await getCoffees(alice)).toEqual([
+        expect.objectContaining({ id: coffee.id, name: coffee.name }),
+      ]);
+      expect(await getCoffeeBags(alice)).toEqual([
+        expect.objectContaining({
+          id: bag.id,
+          coffeeId: coffee.id,
+          legacyPairedCoffee: true,
+        }),
+      ]);
     } finally {
       db.close();
       await Dexie.delete("dialed-local");

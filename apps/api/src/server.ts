@@ -6,7 +6,11 @@ import Fastify, {
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import { fromNodeHeaders } from "better-auth/node";
-import type { SyncStore, StoredSyncOperation } from "@dialed/db";
+import {
+  InvalidSyncDependencyError,
+  type SyncStore,
+  type StoredSyncOperation,
+} from "@dialed/db";
 import type { AuthService, Principal } from "./auth.js";
 import {
   deleteAccountBodySchema,
@@ -166,10 +170,25 @@ export function createServer(
         },
       });
     }
-    const results = await dependencies.store.push(
-      principal.id,
-      parsed.data.operations,
-    );
+    let results;
+    try {
+      results = await dependencies.store.push(
+        principal.id,
+        parsed.data.operations,
+      );
+    } catch (error) {
+      if (error instanceof InvalidSyncDependencyError) {
+        return reply.code(400).send({
+          error: {
+            code: "invalid_dependency",
+            message: error.message,
+            entityId: error.entityId,
+            coffeeId: error.coffeeId,
+          },
+        });
+      }
+      throw error;
+    }
     return { results };
   });
 

@@ -377,7 +377,7 @@ export function CoffeeDialog(props: CoffeeDialogProps) {
               onBlur={() => touch("bag", "startingWeightGrams")}
               error={errorFor("bag", "startingWeightGrams")}
               type="number"
-              min="0"
+              min="0.01"
               max="100000"
               step="any"
             />

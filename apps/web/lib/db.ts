@@ -110,6 +110,7 @@ function bagFromLegacyBean(bean: Bean): CoffeeBag {
   return {
     id: bean.id,
     coffeeId: bean.id,
+    legacyPairedCoffee: true,
     createdAt: bean.createdAt,
   };
 }
@@ -203,6 +204,7 @@ export class DialedDatabase extends Dexie {
             ownerId,
             id,
             coffeeId: id,
+            legacyPairedCoffee: true,
             createdAt,
           })),
         );
@@ -776,7 +778,7 @@ async function applyPreparedRemoteOperation(
     if (remote.entity !== "bean") return;
 
     const deletedBag = current as Owned<CoffeeBag>;
-    if (deletedBag.coffeeId !== remote.entityId) return;
+    if (!deletedBag.legacyPairedCoffee) return;
     const hasPendingCoffeeOperation = await hasPendingLocalOperation(
       ownerId,
       "coffee",
@@ -808,6 +810,12 @@ async function applyPreparedRemoteOperation(
       await db.bags.put({ ...legacyBeanPayload.bag, ownerId });
     }
     return;
+  }
+
+  if (remote.entity === "bean") {
+    const bag = remote.payload as CoffeeBag;
+    const coffee = await db.coffees.get(ownerKey(ownerId, bag.coffeeId));
+    if (!coffee) throw new Error("Coffee does not exist for owner");
   }
 
   const record =

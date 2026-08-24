@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
+import { and, asc, eq, gt, sql } from "drizzle-orm";
 import type { DialedDatabase } from "./client.js";
 import { syncOperations, type SyncAction, type SyncEntity } from "./schema.js";
 
@@ -19,6 +19,97 @@ export interface PushResult {
   operationId: string;
   revision: number;
   duplicate: boolean;
+}
+
+export class InvalidSyncDependencyError extends Error {
+  constructor(
+    public readonly entityId: string,
+    public readonly coffeeId: string,
+  ) {
+    super(`Coffee bag ${entityId} references a missing Coffee ${coffeeId}`);
+    this.name = "InvalidSyncDependencyError";
+  }
+}
+
+interface ActiveBag {
+  coffeeId: string;
+  legacyPairedCoffee: boolean;
+}
+
+function recordPayload(
+  payload: IncomingSyncOperation["payload"],
+): Record<string, unknown> | undefined {
+  return payload && typeof payload === "object" ? payload : undefined;
+}
+
+function applyCoffeeDependencyOperation(
+  coffees: Set<string>,
+  bags: Map<string, ActiveBag>,
+  operation: IncomingSyncOperation,
+  validateCurrentBag: boolean,
+): void {
+  if (operation.entity === "coffee") {
+    if (operation.action === "upsert") coffees.add(operation.entityId);
+    else coffees.delete(operation.entityId);
+    return;
+  }
+  if (operation.entity !== "bean") return;
+
+  if (operation.action === "delete") {
+    const deletedBag = bags.get(operation.entityId);
+    bags.delete(operation.entityId);
+    if (
+      deletedBag?.legacyPairedCoffee &&
+      ![...bags.values()].some((bag) => bag.coffeeId === deletedBag.coffeeId)
+    ) {
+      coffees.delete(deletedBag.coffeeId);
+    }
+    return;
+  }
+
+  const payload = recordPayload(operation.payload);
+  if (!payload) return;
+  if (typeof payload.coffeeId !== "string") {
+    // A raw legacy Bean creates its paired Coffee and bag during replay.
+    coffees.add(operation.entityId);
+    bags.set(operation.entityId, {
+      coffeeId: operation.entityId,
+      legacyPairedCoffee: true,
+    });
+    return;
+  }
+
+  if (validateCurrentBag && !coffees.has(payload.coffeeId)) {
+    throw new InvalidSyncDependencyError(operation.entityId, payload.coffeeId);
+  }
+  bags.set(operation.entityId, {
+    coffeeId: payload.coffeeId,
+    legacyPairedCoffee: payload.legacyPairedCoffee === true,
+  });
+}
+
+/**
+ * Projects the user-scoped append-only ledger, then validates each new
+ * operation in order. Callers must provide existing operations in revision
+ * order and from only the destination user.
+ */
+export function validateCoffeeBagDependencies(
+  existingOperations: readonly IncomingSyncOperation[],
+  incomingOperations: readonly IncomingSyncOperation[],
+): void {
+  const coffees = new Set<string>();
+  const bags = new Map<string, ActiveBag>();
+  const operationIds = new Set<string>();
+
+  for (const operation of existingOperations) {
+    operationIds.add(operation.operationId);
+    applyCoffeeDependencyOperation(coffees, bags, operation, false);
+  }
+  for (const operation of incomingOperations) {
+    if (operationIds.has(operation.operationId)) continue;
+    applyCoffeeDependencyOperation(coffees, bags, operation, true);
+    operationIds.add(operation.operationId);
+  }
 }
 
 export interface SyncStore {
@@ -50,13 +141,13 @@ export class PostgresSyncStore implements SyncStore {
     return this.db.transaction(async (tx) => {
       // Serializes revision allocation per user without a separate cursor table.
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${userId}))`);
-      const current = await tx
-        .select({ revision: syncOperations.revision })
+      const existingLedger = await tx
+        .select()
         .from(syncOperations)
         .where(eq(syncOperations.userId, userId))
-        .orderBy(desc(syncOperations.revision))
-        .limit(1);
-      let nextRevision = (current[0]?.revision ?? 0) + 1;
+        .orderBy(asc(syncOperations.revision));
+      validateCoffeeBagDependencies(existingLedger, operations);
+      let nextRevision = (existingLedger.at(-1)?.revision ?? 0) + 1;
       const results: PushResult[] = [];
 
       for (const operation of operations) {

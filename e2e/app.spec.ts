@@ -96,6 +96,142 @@ test("groups repeat bags and keeps comparisons bag-specific", async ({
   await expect(page.getByText("Roasted Aug 15, 2026")).toBeVisible();
 });
 
+test("adds fixed Coffee fields and a first bag with recoverable validation errors", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await completeOnboarding(page);
+  await page.getByRole("button", { name: "Setup" }).click();
+  await page.getByRole("button", { name: "Add coffee", exact: true }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Add coffee" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Coffee name")).toBeFocused();
+  await dialog.getByLabel("Coffee name").fill("Suke Quto");
+  await dialog.getByLabel("Roaster").fill("Tim Wendelboe");
+  const startingWeight = dialog.getByLabel("Starting weight (grams)");
+  expect(Number(await startingWeight.getAttribute("min"))).toBeGreaterThan(0);
+  await startingWeight.fill("0");
+  await startingWeight.blur();
+  await expect(
+    dialog.getByRole("alert").filter({
+      hasText:
+        "Starting weight must be greater than 0 and at most 100,000 grams",
+    }),
+  ).toBeVisible();
+  await expect(
+    dialog.getByRole("button", { name: "Save coffee" }),
+  ).toBeDisabled();
+
+  await dialog.getByLabel("Origin country").fill("Ethiopia");
+  await dialog.getByLabel("Origin region").fill("Guji");
+  await dialog.getByLabel("Producer").fill("Tesfaye Bekele");
+  await dialog.getByLabel("Process").fill("Washed");
+  await dialog.getByLabel("Varietal").fill("Kurume");
+  await dialog.getByLabel("Elevation (meters)").fill("2100");
+  await dialog.getByLabel("Roast level").selectOption("light");
+  await dialog.getByLabel("Coffee notes").fill("Floral and citrus");
+  await dialog.getByLabel("Roast date").fill("2026-08-18");
+  await dialog.getByLabel("Purchase date").fill("2026-08-20");
+  await dialog.getByLabel("Opened date").fill("2026-08-22");
+  await startingWeight.fill("250");
+  await dialog.getByLabel("Bag notes").fill("Competition lot");
+
+  await page.evaluate(() => {
+    const originalAdd = IDBObjectStore.prototype.add;
+    (
+      globalThis as typeof globalThis & {
+        __dialedOriginalAdd?: typeof IDBObjectStore.prototype.add;
+      }
+    ).__dialedOriginalAdd = originalAdd;
+    IDBObjectStore.prototype.add = function (
+      value: unknown,
+      key?: IDBValidKey,
+    ): IDBRequest<IDBValidKey> {
+      if (this.name === "ownedOperations") {
+        throw new DOMException("Storage full", "QuotaExceededError");
+      }
+      return key === undefined
+        ? originalAdd.call(this, value)
+        : originalAdd.call(this, value, key);
+    };
+  });
+  await dialog.getByRole("button", { name: "Save coffee" }).click();
+  await expect(
+    dialog
+      .getByRole("alert")
+      .filter({ hasText: "Could not save. Please try again." }),
+  ).toBeVisible();
+  await expect(dialog).toBeVisible();
+
+  await page.evaluate(() => {
+    const target = globalThis as typeof globalThis & {
+      __dialedOriginalAdd?: typeof IDBObjectStore.prototype.add;
+    };
+    if (target.__dialedOriginalAdd) {
+      IDBObjectStore.prototype.add = target.__dialedOriginalAdd;
+      delete target.__dialedOriginalAdd;
+    }
+  });
+  await dialog.getByRole("button", { name: "Save coffee" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByText("Suke Quto", { exact: true })).toBeVisible();
+  await expect(page.getByText("Roasted Aug 18, 2026")).toBeVisible();
+
+  const saved = await page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("dialed-local");
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result);
+    });
+    const records = await new Promise<{
+      coffee?: Record<string, unknown>;
+      bag?: Record<string, unknown>;
+    }>((resolve, reject) => {
+      const transaction = database.transaction(
+        ["ownedCoffees", "ownedBeans"],
+        "readonly",
+      );
+      const coffeesRequest = transaction.objectStore("ownedCoffees").getAll();
+      const bagsRequest = transaction.objectStore("ownedBeans").getAll();
+      transaction.oncomplete = () => {
+        const coffee = (
+          coffeesRequest.result as Array<Record<string, unknown>>
+        ).find((candidate) => candidate.name === "Suke Quto");
+        const bag = (bagsRequest.result as Array<Record<string, unknown>>).find(
+          (candidate) => candidate.coffeeId === coffee?.id,
+        );
+        resolve({ coffee, bag });
+      };
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+    return records;
+  });
+
+  expect(saved.coffee).toMatchObject({
+    name: "Suke Quto",
+    roaster: "Tim Wendelboe",
+    originCountry: "Ethiopia",
+    originRegion: "Guji",
+    producer: "Tesfaye Bekele",
+    process: "Washed",
+    varietal: "Kurume",
+    elevationMeters: 2100,
+    roastLevel: "light",
+    notes: "Floral and citrus",
+  });
+  expect(saved.bag).toMatchObject({
+    roastedOn: "2026-08-18",
+    purchasedOn: "2026-08-20",
+    openedOn: "2026-08-22",
+    startingWeightGrams: 250,
+    notes: "Competition lot",
+  });
+});
+
 test("onboards, logs a shot, and returns one next move on mobile", async ({
   page,
 }, testInfo) => {

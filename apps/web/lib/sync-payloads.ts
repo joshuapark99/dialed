@@ -17,7 +17,6 @@ export const RemoteEntityIdSchema = z
 
 const TimestampSchema = z.string().datetime({ offset: true });
 const RequiredTextSchema = z.string().trim().min(1);
-const OptionalTextSchema = RequiredTextSchema.optional();
 const FinitePositiveSchema = z.number().finite().positive();
 const RoastLevelPayloadSchema = z.enum([
   "light",
@@ -42,16 +41,16 @@ const LegacyBeanPayloadSchema = z
 const CoffeePayloadSchema = z
   .object({
     id: RemoteEntityIdSchema,
-    name: RequiredTextSchema,
-    roaster: RequiredTextSchema,
-    originCountry: RequiredTextSchema.optional(),
-    originRegion: RequiredTextSchema.optional(),
-    producer: RequiredTextSchema.optional(),
-    process: RequiredTextSchema.optional(),
-    varietal: RequiredTextSchema.optional(),
+    name: RequiredTextSchema.max(120),
+    roaster: RequiredTextSchema.max(120),
+    originCountry: RequiredTextSchema.max(120).optional(),
+    originRegion: RequiredTextSchema.max(120).optional(),
+    producer: RequiredTextSchema.max(240).optional(),
+    process: RequiredTextSchema.max(120).optional(),
+    varietal: RequiredTextSchema.max(240).optional(),
     elevationMeters: z.number().int().min(1).max(9000).optional(),
     roastLevel: RoastLevelPayloadSchema,
-    notes: OptionalTextSchema,
+    notes: RequiredTextSchema.max(2_000).optional(),
     createdAt: TimestampSchema,
   })
   .strict();
@@ -60,11 +59,32 @@ const CoffeeBagPayloadSchema = z
   .object({
     id: RemoteEntityIdSchema,
     coffeeId: RemoteEntityIdSchema,
+    legacyPairedCoffee: z.literal(true).optional(),
     roastedOn: z.string().date().optional(),
     purchasedOn: z.string().date().optional(),
     openedOn: z.string().date().optional(),
     startingWeightGrams: z.number().finite().positive().max(100_000).optional(),
-    notes: OptionalTextSchema,
+    notes: RequiredTextSchema.max(2_000).optional(),
+    createdAt: TimestampSchema,
+  })
+  .strict();
+
+const LegacyPairedCoffeePayloadSchema = z
+  .object({
+    id: RemoteEntityIdSchema,
+    name: RequiredTextSchema,
+    roaster: RequiredTextSchema,
+    originCountry: RequiredTextSchema.optional(),
+    roastLevel: RoastLevelPayloadSchema,
+    createdAt: TimestampSchema,
+  })
+  .strict();
+
+const LegacyPairedBagPayloadSchema = z
+  .object({
+    id: RemoteEntityIdSchema,
+    coffeeId: RemoteEntityIdSchema,
+    legacyPairedCoffee: z.literal(true),
     createdAt: TimestampSchema,
   })
   .strict();
@@ -73,8 +93,8 @@ const LegacyBeanRemotePayloadSchema = z
   .object({
     id: RemoteEntityIdSchema,
     kind: z.literal("legacy-bean"),
-    coffee: CoffeePayloadSchema,
-    bag: CoffeeBagPayloadSchema,
+    coffee: LegacyPairedCoffeePayloadSchema,
+    bag: LegacyPairedBagPayloadSchema,
   })
   .strict()
   .superRefine((payload, context) => {
@@ -115,6 +135,7 @@ const NormalizedLegacyBeanPayloadSchema = LegacyBeanPayloadSchema.transform(
     bag: {
       id: bean.id,
       coffeeId: bean.id,
+      legacyPairedCoffee: true,
       createdAt: bean.createdAt,
     },
   }),

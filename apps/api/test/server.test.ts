@@ -6,12 +6,13 @@ import type {
   StoredSyncOperation,
   SyncStore,
 } from "@dialed/db";
+import { validateCoffeeBagDependencies } from "@dialed/db";
 import type { AuthService } from "../src/auth.js";
 import { createServer } from "../src/server.js";
 import { syncEntityFixtures } from "../../../test-fixtures/sync-entities.js";
 
 class MemoryStore implements SyncStore {
-  operations: StoredSyncOperation[] = [];
+  operations: Array<StoredSyncOperation & { userId: string }> = [];
   deletedUsers: string[] = [];
   pushCalls = 0;
   pullCalls = 0;
@@ -21,13 +22,18 @@ class MemoryStore implements SyncStore {
     if (this.unavailable) throw new Error("unavailable");
   }
   async push(
-    _userId: string,
+    userId: string,
     incoming: IncomingSyncOperation[],
   ): Promise<PushResult[]> {
     this.pushCalls += 1;
+    validateCoffeeBagDependencies(
+      this.operations.filter((operation) => operation.userId === userId),
+      incoming,
+    );
     return incoming.map((operation) => {
       const duplicate = this.operations.find(
-        (item) => item.operationId === operation.operationId,
+        (item) =>
+          item.userId === userId && item.operationId === operation.operationId,
       );
       if (duplicate)
         return {
@@ -37,6 +43,7 @@ class MemoryStore implements SyncStore {
         };
       const stored = {
         ...operation,
+        userId,
         payload: operation.payload ?? null,
         revision: this.operations.length + 1,
         receivedAt: new Date().toISOString(),
@@ -49,14 +56,20 @@ class MemoryStore implements SyncStore {
       };
     });
   }
-  async pull(_userId: string, cursor: number, limit: number) {
+  async pull(userId: string, cursor: number, limit: number) {
     this.pullCalls += 1;
     return this.operations
-      .filter((operation) => operation.revision > cursor)
-      .slice(0, limit);
+      .filter(
+        (operation) =>
+          operation.userId === userId && operation.revision > cursor,
+      )
+      .slice(0, limit)
+      .map(({ userId: _userId, ...operation }) => operation);
   }
-  async exportUser(_userId: string) {
-    return this.operations;
+  async exportUser(userId: string) {
+    return this.operations
+      .filter((operation) => operation.userId === userId)
+      .map(({ userId: _userId, ...operation }) => operation);
   }
   async deleteUser(userId: string) {
     this.deletedUsers.push(userId);
@@ -73,6 +86,14 @@ const signedOut: AuthService = {
     return null;
   },
 };
+
+function signedInAs(id: string): AuthService {
+  return {
+    async authenticate() {
+      return { id, email: `${id}@example.com`, name: id };
+    },
+  };
+}
 
 const coffeePayload = {
   id: "0198d4a4-3ad8-7fa1-b653-9a51a55d4f90",
@@ -257,6 +278,158 @@ test("sync accepts current Coffee and bag payloads", async () => {
   await app.close();
 });
 
+test("sync accepts a current bag whose Coffee is in existing ledger state", async () => {
+  const store = new MemoryStore();
+  const app = createServer({ auth: signedIn, store });
+  const headers = { "x-dialed-account-id": "user-1" };
+
+  const coffeeResponse = await app.inject({
+    method: "POST",
+    url: "/v1/sync/push",
+    headers,
+    payload: {
+      operations: [
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fa3",
+          entity: "coffee",
+          entityId: coffeePayload.id,
+          action: "upsert",
+          payload: coffeePayload,
+        },
+      ],
+    },
+  });
+  const bagResponse = await app.inject({
+    method: "POST",
+    url: "/v1/sync/push",
+    headers,
+    payload: {
+      operations: [
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fa4",
+          entity: "bean",
+          entityId: coffeeBagPayload.id,
+          action: "upsert",
+          payload: coffeeBagPayload,
+        },
+      ],
+    },
+  });
+
+  assert.equal(coffeeResponse.statusCode, 200);
+  assert.equal(bagResponse.statusCode, 200);
+  assert.equal(store.operations.length, 2);
+  await app.close();
+});
+
+test("sync rejects a current bag when its Coffee is missing", async () => {
+  const store = new MemoryStore();
+  const app = createServer({ auth: signedIn, store });
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/sync/push",
+    headers: { "x-dialed-account-id": "user-1" },
+    payload: {
+      operations: [
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fa5",
+          entity: "bean",
+          entityId: coffeeBagPayload.id,
+          action: "upsert",
+          payload: coffeeBagPayload,
+        },
+      ],
+    },
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.equal(response.json().error.code, "invalid_dependency");
+  assert.equal(store.operations.length, 0);
+  await app.close();
+});
+
+test("sync rejects a current bag when its Coffee belongs to another user", async () => {
+  const store = new MemoryStore();
+  const otherUserApp = createServer({ auth: signedInAs("user-2"), store });
+  const coffeeResponse = await otherUserApp.inject({
+    method: "POST",
+    url: "/v1/sync/push",
+    headers: { "x-dialed-account-id": "user-2" },
+    payload: {
+      operations: [
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fa6",
+          entity: "coffee",
+          entityId: coffeePayload.id,
+          action: "upsert",
+          payload: coffeePayload,
+        },
+      ],
+    },
+  });
+  assert.equal(coffeeResponse.statusCode, 200);
+  await otherUserApp.close();
+
+  const app = createServer({ auth: signedIn, store });
+  const bagResponse = await app.inject({
+    method: "POST",
+    url: "/v1/sync/push",
+    headers: { "x-dialed-account-id": "user-1" },
+    payload: {
+      operations: [
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fa7",
+          entity: "bean",
+          entityId: coffeeBagPayload.id,
+          action: "upsert",
+          payload: coffeeBagPayload,
+        },
+      ],
+    },
+  });
+
+  assert.equal(bagResponse.statusCode, 400);
+  assert.equal(bagResponse.json().error.code, "invalid_dependency");
+  assert.equal(
+    store.operations.filter((operation) => operation.userId === "user-1")
+      .length,
+    0,
+  );
+  await app.close();
+});
+
+test("sync accepts transfer-compatible marked bags", async () => {
+  const store = new MemoryStore();
+  const app = createServer({ auth: signedIn, store });
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/sync/push",
+    headers: { "x-dialed-account-id": "user-1" },
+    payload: {
+      operations: [
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fa8",
+          entity: "coffee",
+          entityId: coffeePayload.id,
+          action: "upsert",
+          payload: coffeePayload,
+        },
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fa9",
+          entity: "bean",
+          entityId: coffeeBagPayload.id,
+          action: "upsert",
+          payload: { ...coffeeBagPayload, legacyPairedCoffee: true },
+        },
+      ],
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(store.operations.length, 2);
+  await app.close();
+});
+
 test("sync continues to accept a legacy bean payload", async () => {
   const store = new MemoryStore();
   const app = createServer({ auth: signedIn, store });
@@ -283,6 +456,36 @@ test("sync continues to accept a legacy bean payload", async () => {
   await app.close();
 });
 
+test("sync keeps oversized legacy bean text compatible", async () => {
+  const store = new MemoryStore();
+  const app = createServer({ auth: signedIn, store });
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/sync/push",
+    headers: { "x-dialed-account-id": "user-1" },
+    payload: {
+      operations: [
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4faa",
+          entity: "bean",
+          entityId: syncEntityFixtures.bean.id,
+          action: "upsert",
+          payload: {
+            ...syncEntityFixtures.bean,
+            name: "n".repeat(121),
+            roaster: "r".repeat(121),
+            origin: "o".repeat(241),
+          },
+        },
+      ],
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(store.operations.length, 1);
+  await app.close();
+});
+
 test("sync rejects payloads that clients cannot replay before store access", async () => {
   const malformed = [
     {
@@ -305,6 +508,27 @@ test("sync rejects payloads that clients cannot replay before store access", asy
       label: "bag has an invalid Coffee ID",
       entity: "bean",
       payload: { ...coffeeBagPayload, coffeeId: "coffee-1" },
+    },
+    ...(
+      [
+        ["name", 121],
+        ["roaster", 121],
+        ["originCountry", 121],
+        ["originRegion", 121],
+        ["producer", 241],
+        ["process", 121],
+        ["varietal", 241],
+        ["notes", 2_001],
+      ] as const
+    ).map(([field, length]) => ({
+      label: `coffee has oversized ${field}`,
+      entity: "coffee" as const,
+      payload: { ...coffeePayload, [field]: "x".repeat(length) },
+    })),
+    {
+      label: "bag has oversized notes",
+      entity: "bean",
+      payload: { ...coffeeBagPayload, notes: "x".repeat(2_001) },
     },
     {
       label: "machine has an invalid capability",

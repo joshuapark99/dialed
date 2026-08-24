@@ -197,7 +197,7 @@ describe("owner-inclusive primary keys", () => {
       entityId: sharedId,
       action: "delete",
     });
-    expect(await getCoffees(alice)).toEqual([]);
+    expect((await getCoffees(alice))[0]?.name).toBe("Alice bean");
     expect((await getCoffees(bob))[0]?.name).toBe("Bob bean");
 
     await applyRemoteOperation(alice, {
@@ -379,7 +379,11 @@ describe("coffee and bag persistence", () => {
       }),
     ]);
     expect(await getCoffeeBags(alice)).toEqual([
-      expect.objectContaining({ id: legacyBean.id, coffeeId: legacyBean.id }),
+      expect.objectContaining({
+        id: legacyBean.id,
+        coffeeId: legacyBean.id,
+        legacyPairedCoffee: true,
+      }),
     ]);
     expect((await getBrews(alice))[0]?.beanId).toBe(legacyBean.id);
   });
@@ -443,6 +447,105 @@ describe("coffee and bag persistence", () => {
 });
 
 describe("atomic remote pages", () => {
+  it("accepts a current bag when its Coffee appears earlier in the page", async () => {
+    const coffeeId = "0198d3a4-1111-7000-8000-000000000098";
+    const bagId = "0198d3a4-1111-7000-8000-000000000099";
+
+    await applyRemotePage(
+      alice,
+      [
+        {
+          entity: "coffee",
+          entityId: coffeeId,
+          action: "upsert",
+          payload: coffee(coffeeId, "Page-ordered coffee"),
+        },
+        {
+          entity: "bean",
+          entityId: bagId,
+          action: "upsert",
+          payload: coffeeBag(bagId, coffeeId),
+        },
+      ],
+      "sync-cursor",
+      2,
+      [],
+    );
+
+    expect(await getCoffees(alice)).toEqual([
+      expect.objectContaining({ id: coffeeId }),
+    ]);
+    expect(await getCoffeeBags(alice)).toEqual([
+      expect.objectContaining({ id: bagId, coffeeId }),
+    ]);
+    expect(await getOwnerPreference(alice, "sync-cursor")).toBe("2");
+  });
+
+  it("rolls back a page and cursor when a current bag has no Coffee", async () => {
+    const missingCoffeeId = "0198d3a4-1111-7000-8000-00000000009a";
+    const bagId = "0198d3a4-1111-7000-8000-00000000009b";
+    const machineId = "0198d3a4-1111-7000-8000-00000000009c";
+    await setOwnerPreference(alice, "sync-cursor", "4");
+
+    await expect(
+      applyRemotePage(
+        alice,
+        [
+          {
+            entity: "machine",
+            entityId: machineId,
+            action: "upsert",
+            payload: machine(machineId),
+          },
+          {
+            entity: "bean",
+            entityId: bagId,
+            action: "upsert",
+            payload: coffeeBag(bagId, missingCoffeeId),
+          },
+        ],
+        "sync-cursor",
+        6,
+        [],
+      ),
+    ).rejects.toThrow("Coffee does not exist for owner");
+
+    expect(await getMachines(alice)).toEqual([]);
+    expect(await getCoffeeBags(alice)).toEqual([]);
+    expect(await getOwnerPreference(alice, "sync-cursor")).toBe("4");
+  });
+
+  it("rejects a current bag whose Coffee belongs to another owner", async () => {
+    const coffeeId = "0198d3a4-1111-7000-8000-00000000009d";
+    const bagId = "0198d3a4-1111-7000-8000-00000000009e";
+    await saveCoffeeWithBag(
+      bob,
+      coffee(coffeeId, "Bob's remote Coffee"),
+      coffeeBag(coffeeId, coffeeId),
+    );
+    await setOwnerPreference(alice, "sync-cursor", "7");
+
+    await expect(
+      applyRemotePage(
+        alice,
+        [
+          {
+            entity: "bean",
+            entityId: bagId,
+            action: "upsert",
+            payload: coffeeBag(bagId, coffeeId),
+          },
+        ],
+        "sync-cursor",
+        8,
+        [],
+      ),
+    ).rejects.toThrow("Coffee does not exist for owner");
+
+    expect(await getCoffeeBags(alice)).toEqual([]);
+    expect(await getOwnerPreference(alice, "sync-cursor")).toBe("7");
+  });
+
   it("applies a validated page and advances only that owner's cursor", async () => {
     const beanId = "0198d3a4-1111-7000-8000-000000000084";
     const machineId = "0198d3a4-1111-7000-8000-000000000085";
