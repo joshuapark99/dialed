@@ -278,6 +278,269 @@ test("sync accepts current Coffee and bag payloads", async () => {
   await app.close();
 });
 
+test("sync atomically rejects Coffee deletion while a current bag remains active", async () => {
+  const store = new MemoryStore();
+  const app = createServer({ auth: signedIn, store });
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/sync/push",
+    headers: { "x-dialed-account-id": "user-1" },
+    payload: {
+      operations: [
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fb0",
+          entity: "coffee",
+          entityId: coffeePayload.id,
+          action: "upsert",
+          payload: coffeePayload,
+        },
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fb1",
+          entity: "bean",
+          entityId: coffeeBagPayload.id,
+          action: "upsert",
+          payload: coffeeBagPayload,
+        },
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fb2",
+          entity: "coffee",
+          entityId: coffeePayload.id,
+          action: "delete",
+        },
+      ],
+    },
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.equal(response.json().error.code, "invalid_dependency");
+  assert.equal(response.json().error.entityId, coffeeBagPayload.id);
+  assert.equal(response.json().error.coffeeId, coffeePayload.id);
+  assert.equal(store.operations.length, 0);
+  await app.close();
+});
+
+test("sync rejects Coffee deletion while a prior-ledger bag remains active", async () => {
+  const store = new MemoryStore();
+  const app = createServer({ auth: signedIn, store });
+  const headers = { "x-dialed-account-id": "user-1" };
+  const setupResponse = await app.inject({
+    method: "POST",
+    url: "/v1/sync/push",
+    headers,
+    payload: {
+      operations: [
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fb3",
+          entity: "coffee",
+          entityId: coffeePayload.id,
+          action: "upsert",
+          payload: coffeePayload,
+        },
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fb4",
+          entity: "bean",
+          entityId: coffeeBagPayload.id,
+          action: "upsert",
+          payload: coffeeBagPayload,
+        },
+      ],
+    },
+  });
+  const deleteResponse = await app.inject({
+    method: "POST",
+    url: "/v1/sync/push",
+    headers,
+    payload: {
+      operations: [
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fb5",
+          entity: "coffee",
+          entityId: coffeePayload.id,
+          action: "delete",
+        },
+      ],
+    },
+  });
+
+  assert.equal(setupResponse.statusCode, 200);
+  assert.equal(deleteResponse.statusCode, 400);
+  assert.equal(deleteResponse.json().error.code, "invalid_dependency");
+  assert.equal(store.operations.length, 2);
+  await app.close();
+});
+
+for (const scenario of [
+  {
+    label: "current bag",
+    operationIds: [
+      "0198d4a4-3ad8-7fa1-b653-9a51a55d4fc0",
+      "0198d4a4-3ad8-7fa1-b653-9a51a55d4fc1",
+      "0198d4a4-3ad8-7fa1-b653-9a51a55d4fc2",
+      "0198d4a4-3ad8-7fa1-b653-9a51a55d4fc3",
+      "0198d4a4-3ad8-7fa1-b653-9a51a55d4fc4",
+      "0198d4a4-3ad8-7fa1-b653-9a51a55d4fc5",
+    ],
+    bagPayload: coffeeBagPayload,
+  },
+  {
+    label: "marked legacy pair",
+    operationIds: [
+      "0198d4a4-3ad8-7fa1-b653-9a51a55d4fd0",
+      "0198d4a4-3ad8-7fa1-b653-9a51a55d4fd1",
+      "0198d4a4-3ad8-7fa1-b653-9a51a55d4fd2",
+      "0198d4a4-3ad8-7fa1-b653-9a51a55d4fd3",
+      "0198d4a4-3ad8-7fa1-b653-9a51a55d4fd4",
+      "0198d4a4-3ad8-7fa1-b653-9a51a55d4fd5",
+    ],
+    bagPayload: { ...coffeeBagPayload, legacyPairedCoffee: true as const },
+  },
+] as const) {
+  test(`sync accepts ordered bag-first removal for a ${scenario.label} and keeps its retry idempotent`, async () => {
+    const store = new MemoryStore();
+    const app = createServer({ auth: signedIn, store });
+    const headers = { "x-dialed-account-id": "user-1" };
+    const coffeeDelete = {
+      operationId: scenario.operationIds[3],
+      entity: "coffee",
+      entityId: coffeePayload.id,
+      action: "delete",
+    } as const;
+    const first = await app.inject({
+      method: "POST",
+      url: "/v1/sync/push",
+      headers,
+      payload: {
+        operations: [
+          {
+            operationId: scenario.operationIds[0],
+            entity: "coffee",
+            entityId: coffeePayload.id,
+            action: "upsert",
+            payload: coffeePayload,
+          },
+          {
+            operationId: scenario.operationIds[1],
+            entity: "bean",
+            entityId: coffeeBagPayload.id,
+            action: "upsert",
+            payload: scenario.bagPayload,
+          },
+          {
+            operationId: scenario.operationIds[2],
+            entity: "bean",
+            entityId: coffeeBagPayload.id,
+            action: "delete",
+          },
+          coffeeDelete,
+        ],
+      },
+    });
+    const recreate = await app.inject({
+      method: "POST",
+      url: "/v1/sync/push",
+      headers,
+      payload: {
+        operations: [
+          {
+            operationId: scenario.operationIds[4],
+            entity: "coffee",
+            entityId: coffeePayload.id,
+            action: "upsert",
+            payload: coffeePayload,
+          },
+          {
+            operationId: scenario.operationIds[5],
+            entity: "bean",
+            entityId: coffeeBagPayload.id,
+            action: "upsert",
+            payload: scenario.bagPayload,
+          },
+        ],
+      },
+    });
+    const retry = await app.inject({
+      method: "POST",
+      url: "/v1/sync/push",
+      headers,
+      payload: { operations: [coffeeDelete] },
+    });
+
+    assert.equal(first.statusCode, 200);
+    assert.equal(recreate.statusCode, 200);
+    assert.equal(retry.statusCode, 200);
+    assert.equal(retry.json().results[0].duplicate, true);
+    assert.equal(store.operations.length, 6);
+    await app.close();
+  });
+}
+
+test("sync scopes Coffee-delete dependencies to the authenticated owner", async () => {
+  const store = new MemoryStore();
+  const otherUserApp = createServer({ auth: signedInAs("user-2"), store });
+  const otherUserResponse = await otherUserApp.inject({
+    method: "POST",
+    url: "/v1/sync/push",
+    headers: { "x-dialed-account-id": "user-2" },
+    payload: {
+      operations: [
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fe0",
+          entity: "coffee",
+          entityId: coffeePayload.id,
+          action: "upsert",
+          payload: coffeePayload,
+        },
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fe1",
+          entity: "bean",
+          entityId: coffeeBagPayload.id,
+          action: "upsert",
+          payload: coffeeBagPayload,
+        },
+      ],
+    },
+  });
+  assert.equal(otherUserResponse.statusCode, 200);
+  await otherUserApp.close();
+
+  const app = createServer({ auth: signedIn, store });
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/sync/push",
+    headers: { "x-dialed-account-id": "user-1" },
+    payload: {
+      operations: [
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fe2",
+          entity: "coffee",
+          entityId: coffeePayload.id,
+          action: "upsert",
+          payload: coffeePayload,
+        },
+        {
+          operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d4fe3",
+          entity: "coffee",
+          entityId: coffeePayload.id,
+          action: "delete",
+        },
+      ],
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(
+    store.operations.filter((operation) => operation.userId === "user-1")
+      .length,
+    2,
+  );
+  assert.equal(
+    store.operations.filter((operation) => operation.userId === "user-2")
+      .length,
+    2,
+  );
+  await app.close();
+});
+
 test("sync accepts a current bag whose Coffee is in existing ledger state", async () => {
   const store = new MemoryStore();
   const app = createServer({ auth: signedIn, store });

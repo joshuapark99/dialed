@@ -773,6 +773,15 @@ async function applyPreparedRemoteOperation(
   if (hasPendingEntityOperation && !legacyBeanPayload) return;
 
   if (remote.action === "delete") {
+    if (remote.entity === "coffee") {
+      const activeBag = await db.bags
+        .where("[ownerId+coffeeId]")
+        .equals([ownerId, remote.entityId])
+        .first();
+      if (activeBag) {
+        throw new Error("Coffee is still referenced by a bag for owner");
+      }
+    }
     if (!current) return;
     await table.delete(key);
     if (remote.entity !== "bean") return;
@@ -835,7 +844,7 @@ export async function applyRemoteOperation(
 
   await db.transaction(
     "rw",
-    remote.entity === "bean"
+    remote.entity === "coffee" || remote.entity === "bean"
       ? [db.coffees, db.bags, db.operations, db.preferences]
       : [table, db.operations, db.preferences],
     async () => {

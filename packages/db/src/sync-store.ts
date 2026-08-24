@@ -46,11 +46,21 @@ function applyCoffeeDependencyOperation(
   coffees: Set<string>,
   bags: Map<string, ActiveBag>,
   operation: IncomingSyncOperation,
-  validateCurrentBag: boolean,
+  validateDependencies: boolean,
 ): void {
   if (operation.entity === "coffee") {
-    if (operation.action === "upsert") coffees.add(operation.entityId);
-    else coffees.delete(operation.entityId);
+    if (operation.action === "upsert") {
+      coffees.add(operation.entityId);
+    } else {
+      if (validateDependencies) {
+        for (const [bagId, bag] of bags) {
+          if (bag.coffeeId === operation.entityId) {
+            throw new InvalidSyncDependencyError(bagId, operation.entityId);
+          }
+        }
+      }
+      coffees.delete(operation.entityId);
+    }
     return;
   }
   if (operation.entity !== "bean") return;
@@ -79,7 +89,7 @@ function applyCoffeeDependencyOperation(
     return;
   }
 
-  if (validateCurrentBag && !coffees.has(payload.coffeeId)) {
+  if (validateDependencies && !coffees.has(payload.coffeeId)) {
     throw new InvalidSyncDependencyError(operation.entityId, payload.coffeeId);
   }
   bags.set(operation.entityId, {
