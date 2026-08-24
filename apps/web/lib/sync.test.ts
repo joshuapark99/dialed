@@ -6,14 +6,19 @@ import {
   acknowledgeOperations as acknowledgeStoredOperations,
   ANONYMOUS_OWNER_ID,
   applyRemotePage as applyStoredRemotePage,
+  beginOwnerMutation,
   clearDeletedAccountData,
   clearOwnerData,
   db,
+  finishOwnerMutation,
   getBrews,
   getCoffeeBags,
   getCoffees,
   getOperations as getStoredOperations,
+  getOperationsByIds as getStoredOperationsByIds,
+  getOwnerMutationState,
   getOwnerPreference,
+  ownerPreferenceKey,
   saveBrew,
   saveCoffeeWithBag,
 } from "./db";
@@ -177,6 +182,10 @@ function brewPayload(yieldGrams: number, updatedAt = createdAt): Brew {
 function dependencies(
   overrides: Partial<SyncDependencies> = {},
 ): SyncDependencies {
+  const getOperations =
+    overrides.getOperations ?? vi.fn(async () => [] as Owned<SyncOperation>[]);
+  let generation = 0;
+  let activeToken: string | undefined;
   return {
     isOnline: () => true,
     fetch: vi.fn(async (input: string | URL | Request) => {
@@ -187,10 +196,35 @@ function dependencies(
       }
       return response(200, { results: [] });
     }),
-    getOperations: vi.fn(async () => []),
+    getOperations,
+    getOperationsByIds: vi.fn(
+      async (ownerId: string, operationIds: readonly string[], limit = 100) =>
+        (await getOperations(ownerId))
+          .filter((operation) => operationIds.includes(operation.operationId))
+          .sort(
+            (left, right) =>
+              operationIds.indexOf(left.operationId) -
+              operationIds.indexOf(right.operationId),
+          )
+          .slice(0, limit),
+    ),
     acknowledgeOperations: vi.fn(async () => undefined),
     getPreference: vi.fn(async () => undefined),
     applyRemotePage: vi.fn(async () => undefined),
+    getOwnerMutationState: vi.fn(async () => ({
+      generation,
+      ...(activeToken === undefined ? {} : { activeToken }),
+      deleted: false,
+    })),
+    beginOwnerMutation: vi.fn(async () => {
+      generation += 1;
+      activeToken = `mutation-${generation}`;
+      return { generation, token: activeToken };
+    }),
+    finishOwnerMutation: vi.fn(async (_ownerId: string, token: string) => {
+      if (activeToken !== token) throw new Error("mutation token mismatch");
+      activeToken = undefined;
+    }),
     ...overrides,
   };
 }
@@ -212,6 +246,27 @@ function fakeOwnerLock(): OwnerLock {
       return result;
     },
   };
+}
+
+function storedDependencies(
+  fetch: SyncDependencies["fetch"] = async (input: string | URL | Request) =>
+    String(input) === "/api/v1/me"
+      ? response(200, { user: aliceAccount })
+      : response(200, { operations: [], cursor: 0, hasMore: false }),
+  overrides: Partial<SyncDependencies> = {},
+): SyncDependencies {
+  return dependencies({
+    fetch,
+    getOperations: getStoredOperations,
+    getOperationsByIds: getStoredOperationsByIds,
+    acknowledgeOperations: acknowledgeStoredOperations,
+    getPreference: getOwnerPreference,
+    applyRemotePage: applyStoredRemotePage,
+    getOwnerMutationState,
+    beginOwnerMutation,
+    finishOwnerMutation,
+    ...overrides,
+  });
 }
 
 describe("owner-aware synchronization", () => {
@@ -305,14 +360,18 @@ describe("owner-aware synchronization", () => {
     let pending: Array<Owned<SyncOperation>> = [];
     const transferredOperation = queuedOperation();
     const getOperations = vi.fn(async (_ownerId: string, limit?: number) => {
-      if (limit === 100) {
+      return limit === undefined ? pending : pending.slice(0, limit);
+    });
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      if (String(input) === "/api/v1/me") {
         events.push(
           staged
             ? "destination-sync-after-stage"
             : "destination-sync-before-stage",
         );
+        return response(200, { user: aliceAccount });
       }
-      return limit === undefined ? pending : pending.slice(0, limit);
+      return response(200, { operations: [], cursor: 0, hasMore: false });
     });
     const acknowledgeOperations = vi.fn(
       async (_ownerId: string, operationIds: string[]) => {
@@ -327,6 +386,7 @@ describe("owner-aware synchronization", () => {
     );
     const coordinator = createSyncCoordinator(
       dependencies({
+        fetch,
         getOperations,
         acknowledgeOperations,
         getPreference: transferPreferenceReader(() => storedJournal),
@@ -345,6 +405,7 @@ describe("owner-aware synchronization", () => {
       },
       async () => {
         events.push("complete");
+        storedJournal = undefined;
         return { completed: true, pendingCount: 0 };
       },
     );
@@ -388,10 +449,14 @@ describe("owner-aware synchronization", () => {
     let accountChecks = 0;
     let sourcePresent = true;
     let journalPresent = false;
+    let storedJournal: AnonymousTransferJournal | undefined;
+    let pending: Array<Owned<SyncOperation>> = [];
     const postStageFailure = new Error("post-stage sync failed");
     const stage = vi.fn(async () => {
       journalPresent = true;
-      return transferJournal();
+      storedJournal = transferJournal(alice, [operationId]);
+      pending = [queuedOperation()];
+      return storedJournal;
     });
     const complete = vi.fn(async () => {
       sourcePresent = false;
@@ -400,6 +465,10 @@ describe("owner-aware synchronization", () => {
     });
     const coordinator = createSyncCoordinator(
       dependencies({
+        getOperations: vi.fn(async (_ownerId: string, limit?: number) =>
+          limit === undefined ? pending : pending.slice(0, limit),
+        ),
+        getPreference: transferPreferenceReader(() => storedJournal),
         fetch: vi.fn(async (input: string | URL | Request) => {
           const url = String(input);
           if (url === "/api/v1/me") {
@@ -556,6 +625,7 @@ describe("owner-aware synchronization", () => {
       );
       await completionStarted;
 
+      const joinedSync = coordinator.synchronize(alice);
       let resetCalls = 0;
       const reset = coordinator.resetAndSynchronize(alice, async () => {
         resetCalls += 1;
@@ -567,8 +637,10 @@ describe("owner-aware synchronization", () => {
         pendingCount: 1,
       });
       const resetError = await reset.catch((error: unknown) => error);
+      const joinedError = await joinedSync.catch((error: unknown) => error);
 
       expect(resetError).toBeInstanceOf(Error);
+      expect(joinedError).toBeInstanceOf(Error);
       expect(resetCalls).toBe(0);
       expect(
         await getOwnerPreference(alice, ANONYMOUS_TRANSFER_JOURNAL_KEY),
@@ -581,6 +653,295 @@ describe("owner-aware synchronization", () => {
       ).toBe(alice);
       expect(await getCoffees(ANONYMOUS_OWNER_ID)).toHaveLength(1);
       expect(await getCoffees(alice)).toHaveLength(1);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("rejects a post-settlement reset from another coordinator while transfer state persists", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const { coffee, bag } = coffeeAndBag();
+      await saveCoffeeWithBag(ANONYMOUS_OWNER_ID, coffee, bag);
+      const lock = fakeOwnerLock();
+      const transferCoordinator = createSyncCoordinator(
+        storedDependencies(),
+        lock,
+      );
+      const destructiveCoordinator = createSyncCoordinator(
+        storedDependencies(),
+        lock,
+      );
+
+      await expect(
+        transferCoordinator.transferAnonymous(
+          alice,
+          () => stageAnonymousTransfer(alice),
+          async () => ({ completed: false, pendingCount: 1 }),
+        ),
+      ).resolves.toEqual({ completed: false, pendingCount: 1 });
+
+      let resetCalls = 0;
+      await expect(
+        destructiveCoordinator.resetAndSynchronize(alice, async () => {
+          resetCalls += 1;
+          return clearOwnerData(alice);
+        }),
+      ).rejects.toBeInstanceOf(Error);
+
+      expect(resetCalls).toBe(0);
+      expect(
+        await getOwnerPreference(alice, ANONYMOUS_TRANSFER_JOURNAL_KEY),
+      ).toBeDefined();
+      expect(
+        await getOwnerPreference(
+          ANONYMOUS_OWNER_ID,
+          ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+        ),
+      ).toBe(alice);
+      expect(await getCoffees(ANONYMOUS_OWNER_ID)).toHaveLength(1);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("rejects a post-settlement deletion from another coordinator after transfer failure", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const { coffee, bag } = coffeeAndBag();
+      await saveCoffeeWithBag(ANONYMOUS_OWNER_ID, coffee, bag);
+      let accountChecks = 0;
+      const transferFailure = new Error("post-stage sync failed");
+      const transferFetch = vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url === "/api/v1/me") {
+          accountChecks += 1;
+          if (accountChecks === 2) throw transferFailure;
+          return response(200, { user: aliceAccount });
+        }
+        return response(200, { operations: [], cursor: 0, hasMore: false });
+      });
+      const lock = fakeOwnerLock();
+      const transferCoordinator = createSyncCoordinator(
+        storedDependencies(transferFetch),
+        lock,
+      );
+      const destructiveCoordinator = createSyncCoordinator(
+        storedDependencies(),
+        lock,
+      );
+
+      await expect(
+        transferCoordinator.transferAnonymous(
+          alice,
+          () => stageAnonymousTransfer(alice),
+          () => completeAnonymousTransfer(alice),
+        ),
+      ).rejects.toBe(transferFailure);
+
+      let cloudDeleteCalls = 0;
+      let localDeleteCalls = 0;
+      await expect(
+        destructiveCoordinator.deleteAccount(
+          alice,
+          async () => {
+            cloudDeleteCalls += 1;
+          },
+          async () => {
+            localDeleteCalls += 1;
+            await clearDeletedAccountData(alice);
+          },
+        ),
+      ).rejects.toBeInstanceOf(Error);
+
+      expect(cloudDeleteCalls).toBe(0);
+      expect(localDeleteCalls).toBe(0);
+      expect(
+        await getOwnerPreference(alice, ANONYMOUS_TRANSFER_JOURNAL_KEY),
+      ).toBeDefined();
+      expect(
+        await getOwnerPreference(
+          ANONYMOUS_OWNER_ID,
+          ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+        ),
+      ).toBe(alice);
+      expect(await getStoredOperations(alice)).toHaveLength(2);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("rejects a cross-coordinator transfer requested behind a queued reset", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const { coffee, bag } = coffeeAndBag();
+      await saveCoffeeWithBag(ANONYMOUS_OWNER_ID, coffee, bag);
+      const lock = fakeOwnerLock();
+      const resetCoordinator = createSyncCoordinator(
+        storedDependencies(),
+        lock,
+      );
+      const transferCoordinator = createSyncCoordinator(
+        storedDependencies(),
+        lock,
+      );
+      let markResetStarted!: () => void;
+      let releaseReset!: () => void;
+      const resetStarted = new Promise<void>((resolve) => {
+        markResetStarted = resolve;
+      });
+      const resetBlocked = new Promise<void>((resolve) => {
+        releaseReset = resolve;
+      });
+      const reset = resetCoordinator.resetAndSynchronize(alice, async () => {
+        markResetStarted();
+        await resetBlocked;
+        return {
+          cleared: false as const,
+          reason: "pending-operations" as const,
+          pendingCount: 1,
+        };
+      });
+      await resetStarted;
+
+      let stageCalls = 0;
+      const transfer = transferCoordinator.transferAnonymous(
+        alice,
+        async () => {
+          stageCalls += 1;
+          return stageAnonymousTransfer(alice);
+        },
+        () => completeAnonymousTransfer(alice),
+      );
+      releaseReset();
+      await reset;
+      await expect(transfer).rejects.toBeInstanceOf(Error);
+
+      expect(stageCalls).toBe(0);
+      expect(await getCoffees(ANONYMOUS_OWNER_ID)).toHaveLength(1);
+      expect(
+        await getOwnerPreference(alice, ANONYMOUS_TRANSFER_JOURNAL_KEY),
+      ).toBeUndefined();
+      expect(await getOwnerMutationState(alice)).toEqual({
+        generation: 1,
+        deleted: false,
+      });
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("rejects a cross-coordinator transfer requested behind account deletion", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const { coffee, bag } = coffeeAndBag();
+      await saveCoffeeWithBag(ANONYMOUS_OWNER_ID, coffee, bag);
+      const lock = fakeOwnerLock();
+      const deletionCoordinator = createSyncCoordinator(
+        storedDependencies(),
+        lock,
+      );
+      const transferCoordinator = createSyncCoordinator(
+        storedDependencies(),
+        lock,
+      );
+      let markDeletionStarted!: () => void;
+      let releaseDeletion!: () => void;
+      const deletionStarted = new Promise<void>((resolve) => {
+        markDeletionStarted = resolve;
+      });
+      const deletionBlocked = new Promise<void>((resolve) => {
+        releaseDeletion = resolve;
+      });
+      const deletion = deletionCoordinator.deleteAccount(
+        alice,
+        async () => {
+          markDeletionStarted();
+          await deletionBlocked;
+        },
+        () => clearDeletedAccountData(alice).then(() => undefined),
+      );
+      await deletionStarted;
+
+      let stageCalls = 0;
+      const transfer = transferCoordinator.transferAnonymous(
+        alice,
+        async () => {
+          stageCalls += 1;
+          return stageAnonymousTransfer(alice);
+        },
+        () => completeAnonymousTransfer(alice),
+      );
+      releaseDeletion();
+      await deletion;
+      await expect(transfer).rejects.toBeInstanceOf(Error);
+
+      expect(stageCalls).toBe(0);
+      expect(await getOwnerMutationState(alice)).toEqual({
+        generation: 1,
+        deleted: true,
+      });
+      expect(await getCoffees(ANONYMOUS_OWNER_ID)).toHaveLength(1);
+      expect(
+        await getOwnerPreference(alice, ANONYMOUS_TRANSFER_JOURNAL_KEY),
+      ).toBeUndefined();
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("clears failed deletion intent so a later transfer can retry", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const { coffee, bag } = coffeeAndBag();
+      await saveCoffeeWithBag(ANONYMOUS_OWNER_ID, coffee, bag);
+      const lock = fakeOwnerLock();
+      const deletionCoordinator = createSyncCoordinator(
+        storedDependencies(),
+        lock,
+      );
+      const transferCoordinator = createSyncCoordinator(
+        storedDependencies(),
+        lock,
+      );
+      const deletionFailure = new Error("cloud deletion failed");
+
+      await expect(
+        deletionCoordinator.deleteAccount(
+          alice,
+          async () => {
+            throw deletionFailure;
+          },
+          () => clearDeletedAccountData(alice).then(() => undefined),
+        ),
+      ).rejects.toBe(deletionFailure);
+      expect(await getOwnerMutationState(alice)).toEqual({
+        generation: 1,
+        deleted: false,
+      });
+
+      await expect(
+        transferCoordinator.transferAnonymous(
+          alice,
+          () => stageAnonymousTransfer(alice),
+          () => completeAnonymousTransfer(alice),
+        ),
+      ).resolves.toEqual({ completed: true, pendingCount: 0 });
     } finally {
       db.close();
       await Dexie.delete("dialed-local");
@@ -660,6 +1021,331 @@ describe("owner-aware synchronization", () => {
 
     expect(transferError).toBeInstanceOf(Error);
     expect(stageWrites).toBe(0);
+  });
+
+  it("persists initial destination acknowledgement before staging", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const destination = coffeeAndBag(
+        "0198d3a4-1111-7000-8000-000000000221",
+        "0198d3a4-1111-7000-8000-000000000222",
+      );
+      const source = coffeeAndBag(
+        "0198d3a4-1111-7000-8000-000000000223",
+        "0198d3a4-1111-7000-8000-000000000224",
+      );
+      await saveCoffeeWithBag(alice, destination.coffee, destination.bag);
+      const initialOperationIds = (await getStoredOperations(alice)).map(
+        ({ operationId: pendingId }) => pendingId,
+      );
+      await saveCoffeeWithBag(ANONYMOUS_OWNER_ID, source.coffee, source.bag);
+      let markInitialAcknowledgement!: () => void;
+      let releaseInitialAcknowledgement!: () => void;
+      const initialAcknowledgementStarted = new Promise<void>((resolve) => {
+        markInitialAcknowledgement = resolve;
+      });
+      const initialAcknowledgementBlocked = new Promise<void>((resolve) => {
+        releaseInitialAcknowledgement = resolve;
+      });
+      let firstAcknowledgement = true;
+      const acknowledgeOperations = async (
+        ownerId: string,
+        operationIds: string[],
+      ): Promise<void> => {
+        if (firstAcknowledgement) {
+          firstAcknowledgement = false;
+          markInitialAcknowledgement();
+          await initialAcknowledgementBlocked;
+        }
+        await acknowledgeStoredOperations(ownerId, operationIds);
+      };
+      const coordinator = createSyncCoordinator(
+        storedDependencies(undefined, { acknowledgeOperations }),
+        fakeOwnerLock(),
+      );
+      let stageCalls = 0;
+      let stagedJournal!: AnonymousTransferJournal;
+
+      const transfer = coordinator.transferAnonymous(
+        alice,
+        async () => {
+          stageCalls += 1;
+          expect(await getStoredOperations(alice)).toEqual([]);
+          stagedJournal = await stageAnonymousTransfer(alice);
+          return stagedJournal;
+        },
+        () => completeAnonymousTransfer(alice),
+      );
+      await initialAcknowledgementStarted;
+
+      expect(stageCalls).toBe(0);
+      expect(
+        await getOwnerPreference(alice, ANONYMOUS_TRANSFER_JOURNAL_KEY),
+      ).toBeUndefined();
+      expect(
+        (await getStoredOperations(alice)).map(
+          ({ operationId: pendingId }) => pendingId,
+        ),
+      ).toEqual(initialOperationIds);
+
+      releaseInitialAcknowledgement();
+      await expect(transfer).resolves.toEqual({
+        completed: true,
+        pendingCount: 0,
+      });
+      expect(stageCalls).toBe(1);
+      expect(stagedJournal.operationIds).toHaveLength(2);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("completes from persisted acknowledgement without another post-stage network pass", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const { coffee, bag } = coffeeAndBag();
+      await saveCoffeeWithBag(ANONYMOUS_OWNER_ID, coffee, bag);
+      const fetch = vi.fn(async (input: string | URL | Request) =>
+        String(input) === "/api/v1/me"
+          ? response(200, { user: aliceAccount })
+          : response(200, { operations: [], cursor: 0, hasMore: false }),
+      );
+      const coordinator = createSyncCoordinator(
+        storedDependencies(fetch),
+        fakeOwnerLock(),
+      );
+
+      await expect(
+        coordinator.transferAnonymous(
+          alice,
+          async () => {
+            const journal = await stageAnonymousTransfer(alice);
+            await acknowledgeStoredOperations(alice, journal.operationIds);
+            return JSON.parse(
+              (await getOwnerPreference(
+                alice,
+                ANONYMOUS_TRANSFER_JOURNAL_KEY,
+              ))!,
+            ) as AnonymousTransferJournal;
+          },
+          () => completeAnonymousTransfer(alice),
+        ),
+      ).resolves.toEqual({ completed: true, pendingCount: 0 });
+
+      expect(
+        fetch.mock.calls.filter(([input]) => String(input) === "/api/v1/me"),
+      ).toHaveLength(1);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("pushes only transfer journal operations when unrelated work sorts ahead", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const { coffee, bag } = coffeeAndBag();
+      await saveCoffeeWithBag(ANONYMOUS_OWNER_ID, coffee, bag);
+      const unrelatedOperationId = "0198d3a4-1111-7000-8000-000000000220";
+      const pushedBatches: string[][] = [];
+      const fetch = vi.fn(
+        async (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          if (url === "/api/v1/me") {
+            return response(200, { user: aliceAccount });
+          }
+          if (url === "/api/v1/sync/push") {
+            const body = JSON.parse(String(init?.body)) as {
+              operations: Array<{ operationId: string }>;
+            };
+            pushedBatches.push(
+              body.operations.map(({ operationId: pushedId }) => pushedId),
+            );
+            return response(200, { results: [] });
+          }
+          return response(200, { operations: [], cursor: 0, hasMore: false });
+        },
+      );
+      const coordinator = createSyncCoordinator(
+        storedDependencies(fetch),
+        fakeOwnerLock(),
+      );
+      let stagedJournal!: AnonymousTransferJournal;
+
+      await expect(
+        coordinator.transferAnonymous(
+          alice,
+          async () => {
+            stagedJournal = await stageAnonymousTransfer(alice);
+            await db.operations.add({
+              ownerId: alice,
+              operationId: unrelatedOperationId,
+              entity: "machine",
+              entityId: unrelatedOperationId,
+              action: "delete",
+              createdAt: "2020-01-01T00:00:00.000Z",
+            });
+            return stagedJournal;
+          },
+          () => completeAnonymousTransfer(alice),
+        ),
+      ).resolves.toEqual({ completed: true, pendingCount: 0 });
+
+      expect(pushedBatches).toEqual([stagedJournal.operationIds]);
+      expect(
+        (await getStoredOperations(alice)).map(
+          ({ operationId: pendingId }) => pendingId,
+        ),
+      ).toEqual([unrelatedOperationId]);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("fails before post-stage network work on a returned and persisted journal mismatch and retries", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const { coffee, bag } = coffeeAndBag();
+      await saveCoffeeWithBag(ANONYMOUS_OWNER_ID, coffee, bag);
+      const pushedBatches: string[][] = [];
+      const fetch = vi.fn(
+        async (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          if (url === "/api/v1/me") {
+            return response(200, { user: aliceAccount });
+          }
+          if (url === "/api/v1/sync/push") {
+            const body = JSON.parse(String(init?.body)) as {
+              operations: Array<{ operationId: string }>;
+            };
+            pushedBatches.push(
+              body.operations.map(({ operationId: pushedId }) => pushedId),
+            );
+            return response(200, { results: [] });
+          }
+          return response(200, { operations: [], cursor: 0, hasMore: false });
+        },
+      );
+      const coordinator = createSyncCoordinator(
+        storedDependencies(fetch),
+        fakeOwnerLock(),
+      );
+      let persistedJournal!: AnonymousTransferJournal;
+
+      await expect(
+        coordinator.transferAnonymous(
+          alice,
+          async () => {
+            persistedJournal = await stageAnonymousTransfer(alice);
+            return {
+              ...persistedJournal,
+              startedAt: "2020-01-01T00:00:00.000Z",
+            };
+          },
+          () => completeAnonymousTransfer(alice),
+        ),
+      ).rejects.toBeInstanceOf(AnonymousTransferStateError);
+
+      expect(pushedBatches).toEqual([]);
+      expect(
+        (await getStoredOperations(alice)).map(
+          ({ operationId: pendingId }) => pendingId,
+        ),
+      ).toEqual(persistedJournal.operationIds);
+
+      await expect(
+        coordinator.transferAnonymous(
+          alice,
+          () => stageAnonymousTransfer(alice),
+          () => completeAnonymousTransfer(alice),
+        ),
+      ).resolves.toEqual({ completed: true, pendingCount: 0 });
+      expect(pushedBatches).toEqual([persistedJournal.operationIds]);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("fails closed when persisted acknowledgement loses an earlier transfer ID", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const { coffee, bag } = coffeeAndBag();
+      await saveCoffeeWithBag(ANONYMOUS_OWNER_ID, coffee, bag);
+      let returnedJournal!: AnonymousTransferJournal;
+      const acknowledgeOperations = async (
+        ownerId: string,
+        operationIds: string[],
+      ): Promise<void> => {
+        const persisted = JSON.parse(
+          (await getOwnerPreference(ownerId, ANONYMOUS_TRANSFER_JOURNAL_KEY))!,
+        ) as AnonymousTransferJournal;
+        await db.preferences.put({
+          key: ownerPreferenceKey(ownerId, ANONYMOUS_TRANSFER_JOURNAL_KEY),
+          value: JSON.stringify({
+            ...persisted,
+            acknowledgedOperationIds: [],
+          }),
+        });
+        await acknowledgeStoredOperations(ownerId, operationIds);
+      };
+      const coordinator = createSyncCoordinator(
+        storedDependencies(undefined, { acknowledgeOperations }),
+        fakeOwnerLock(),
+      );
+
+      await expect(
+        coordinator.transferAnonymous(
+          alice,
+          async () => {
+            const journal = await stageAnonymousTransfer(alice);
+            await acknowledgeStoredOperations(alice, [
+              journal.operationIds[0]!,
+            ]);
+            returnedJournal = JSON.parse(
+              (await getOwnerPreference(
+                alice,
+                ANONYMOUS_TRANSFER_JOURNAL_KEY,
+              ))!,
+            ) as AnonymousTransferJournal;
+            return returnedJournal;
+          },
+          () => completeAnonymousTransfer(alice),
+        ),
+      ).rejects.toBeInstanceOf(AnonymousTransferStateError);
+
+      const corruptedJournal = JSON.parse(
+        (await getOwnerPreference(alice, ANONYMOUS_TRANSFER_JOURNAL_KEY))!,
+      ) as AnonymousTransferJournal;
+      expect(returnedJournal.acknowledgedOperationIds).toEqual([
+        returnedJournal.operationIds[0],
+      ]);
+      expect(corruptedJournal.acknowledgedOperationIds).toEqual([
+        returnedJournal.operationIds[1],
+      ]);
+      expect(await getCoffees(ANONYMOUS_OWNER_ID)).toHaveLength(1);
+      expect(
+        await getOwnerPreference(
+          ANONYMOUS_OWNER_ID,
+          ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+        ),
+      ).toBe(alice);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
   });
 
   it("completes after storage acknowledges transfer operations without draining later writes", async () => {
@@ -894,6 +1580,8 @@ describe("owner-aware synchronization", () => {
       transferOperationIds,
     );
     expect(pending.map(({ operationId: pendingId }) => pendingId)).toEqual([
+      "unrelated-operation-1",
+      "unrelated-operation-2",
       "unrelated-operation-3",
     ]);
   });
@@ -1014,10 +1702,25 @@ describe("owner-aware synchronization", () => {
     });
     const events: string[] = [];
     let storedJournal: AnonymousTransferJournal | undefined;
+    let pending: Array<Owned<SyncOperation>> = [];
     let accountChecks = 0;
     const coordinator = createSyncCoordinator(
       dependencies({
         getPreference: transferPreferenceReader(() => storedJournal),
+        getOperations: vi.fn(async (_ownerId: string, limit?: number) =>
+          limit === undefined ? pending : pending.slice(0, limit),
+        ),
+        acknowledgeOperations: vi.fn(
+          async (_ownerId: string, operationIds: string[]) => {
+            storedJournal = {
+              ...storedJournal!,
+              acknowledgedOperationIds: operationIds,
+            };
+            pending = pending.filter(
+              ({ operationId: pendingId }) => !operationIds.includes(pendingId),
+            );
+          },
+        ),
         fetch: vi.fn(async (input: string | URL | Request) => {
           const url = String(input);
           if (url === "/api/v1/me") {
@@ -1038,11 +1741,13 @@ describe("owner-aware synchronization", () => {
       alice,
       async () => {
         events.push("stage");
-        storedJournal = transferJournal();
+        storedJournal = transferJournal(alice, [operationId]);
+        pending = [queuedOperation()];
         return storedJournal;
       },
       async () => {
         events.push("complete");
+        storedJournal = undefined;
         return { completed: true, pendingCount: 0 };
       },
     );
@@ -1075,10 +1780,25 @@ describe("owner-aware synchronization", () => {
     });
     const events: string[] = [];
     let storedJournal: AnonymousTransferJournal | undefined;
+    let pending: Array<Owned<SyncOperation>> = [];
     let accountChecks = 0;
     const coordinator = createSyncCoordinator(
       dependencies({
         getPreference: transferPreferenceReader(() => storedJournal),
+        getOperations: vi.fn(async (_ownerId: string, limit?: number) =>
+          limit === undefined ? pending : pending.slice(0, limit),
+        ),
+        acknowledgeOperations: vi.fn(
+          async (_ownerId: string, operationIds: string[]) => {
+            storedJournal = {
+              ...storedJournal!,
+              acknowledgedOperationIds: operationIds,
+            };
+            pending = pending.filter(
+              ({ operationId: pendingId }) => !operationIds.includes(pendingId),
+            );
+          },
+        ),
         fetch: vi.fn(async (input: string | URL | Request) => {
           const url = String(input);
           if (url === "/api/v1/me") {
@@ -1099,11 +1819,13 @@ describe("owner-aware synchronization", () => {
       alice,
       async () => {
         events.push("stage");
-        storedJournal = transferJournal();
+        storedJournal = transferJournal(alice, [operationId]);
+        pending = [queuedOperation()];
         return storedJournal;
       },
       async () => {
         events.push("complete");
+        storedJournal = undefined;
         return { completed: true, pendingCount: 0 };
       },
     );
@@ -1203,11 +1925,18 @@ describe("owner-aware synchronization", () => {
     );
     await stageStarted;
 
+    let joinedSettled = false;
     const joinedSync = coordinator.synchronize(alice);
+    void joinedSync.finally(() => {
+      joinedSettled = true;
+    });
+    await Promise.resolve();
+    expect(joinedSettled).toBe(false);
     releaseStage();
     await Promise.all([transfer, joinedSync]);
 
-    expect(fullQueueReads).toBe(2);
+    expect(joinedSettled).toBe(true);
+    expect(fullQueueReads).toBe(1);
   });
 
   it("rejects an anonymous transfer destination", async () => {
@@ -1312,7 +2041,9 @@ describe("owner-aware synchronization", () => {
     const coordinator = createSyncCoordinator(
       dependencies({
         fetch,
-        getPreference: vi.fn(async () => (cleared ? undefined : "17")),
+        getPreference: vi.fn(async (_ownerId: string, key: string) =>
+          key === "sync-cursor" && !cleared ? "17" : undefined,
+        ),
       }),
     );
 

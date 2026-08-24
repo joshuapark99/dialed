@@ -7,6 +7,7 @@ import {
   acknowledgeOperations,
   applyRemotePage,
   applyRemoteOperation,
+  beginOwnerMutation,
   clearDeletedAccountData,
   clearOwnerData,
   db,
@@ -19,6 +20,8 @@ import {
   getGrinders,
   getMachines,
   getOperations,
+  getOperationsByIds,
+  getOwnerMutationState,
   getOwnerPreference,
   markBrewSynced,
   OwnerTransferInProgressError,
@@ -30,12 +33,36 @@ import {
   saveGrinder,
   saveMachine,
   setOwnerPreference,
+  finishOwnerMutation,
   updateBrew,
 } from "./db";
-import type { Bean, Brew, Coffee, CoffeeBag, Grinder, Machine } from "./models";
+import type {
+  Bean,
+  Brew,
+  Coffee,
+  CoffeeBag,
+  Grinder,
+  Machine,
+  Owned,
+  SyncOperation,
+} from "./models";
 
 const alice = "account:alice";
 const bob = "account:bob";
+
+function queuedDbOperation(
+  ownerId: string,
+  operationId: string,
+): Owned<SyncOperation> {
+  return {
+    ownerId,
+    operationId,
+    entity: "machine",
+    entityId: operationId,
+    action: "delete",
+    createdAt: "2026-08-22T12:00:00.000Z",
+  };
+}
 
 function bean(id: string, name: string): Bean {
   return {
@@ -141,6 +168,65 @@ beforeEach(async () => {
 });
 
 describe("owner-inclusive primary keys", () => {
+  it("selects only requested owner operations in requested order and bounded batches", async () => {
+    const firstId = "0198d3a4-1111-7000-8000-000000000180";
+    const unrelatedId = "0198d3a4-1111-7000-8000-000000000181";
+    const lastId = "0198d3a4-1111-7000-8000-000000000182";
+    const records = [
+      {
+        ...queuedDbOperation(alice, firstId),
+        createdAt: "2026-08-22T12:02:00.000Z",
+      },
+      {
+        ...queuedDbOperation(alice, unrelatedId),
+        createdAt: "2026-08-22T12:00:00.000Z",
+      },
+      {
+        ...queuedDbOperation(alice, lastId),
+        createdAt: "2026-08-22T12:01:00.000Z",
+      },
+      {
+        ...queuedDbOperation(bob, lastId),
+        createdAt: "2026-08-22T11:59:00.000Z",
+      },
+    ];
+    await db.operations.bulkAdd(records);
+
+    await expect(
+      getOperationsByIds(alice, [firstId, lastId], 1),
+    ).resolves.toEqual([records[0]]);
+    await expect(
+      getOperationsByIds(alice, [firstId, lastId], 100),
+    ).resolves.toEqual([records[0], records[2]]);
+  });
+
+  it("persists owner mutation generations while clearing active intent", async () => {
+    await expect(getOwnerMutationState(alice)).resolves.toEqual({
+      generation: 0,
+      deleted: false,
+    });
+
+    const first = await beginOwnerMutation(alice);
+    await expect(getOwnerMutationState(alice)).resolves.toEqual({
+      generation: 1,
+      activeToken: first.token,
+      deleted: false,
+    });
+    await finishOwnerMutation(alice, first.token);
+    await expect(getOwnerMutationState(alice)).resolves.toEqual({
+      generation: 1,
+      deleted: false,
+    });
+
+    const second = await beginOwnerMutation(alice);
+    await finishOwnerMutation(alice, second.token);
+    await clearDeletedAccountData(alice);
+    await expect(getOwnerMutationState(alice)).resolves.toEqual({
+      generation: 2,
+      deleted: true,
+    });
+  });
+
   it("allows every entity and operation ID to coexist across owners", async () => {
     const sharedId = "0198d3a4-1111-7000-8000-000000000080";
     const sharedOperationId = "0198d3a4-1111-7000-8000-000000000081";

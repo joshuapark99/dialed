@@ -55,6 +55,26 @@ export class OwnerTransferInProgressError extends Error {
 
 type OwnerScopedKey = [ownerId: string, localId: string];
 const deletedOwnerMarkerKey = "deleted-owner";
+const ownerMutationStatePrefix = "owner-mutation-state";
+
+interface StoredOwnerMutationState {
+  version: 1;
+  generation: number;
+  activeToken?: string;
+}
+
+export interface OwnerMutationState {
+  generation: number;
+  activeToken?: string;
+  deleted: boolean;
+}
+
+export class OwnerMutationStateError extends Error {
+  constructor() {
+    super("Owner mutation state is inconsistent; local data was preserved");
+    this.name = "OwnerMutationStateError";
+  }
+}
 
 const legacyStores = {
   beans: "id, ownerId, [ownerId+createdAt], name, roaster, createdAt",
@@ -260,6 +280,111 @@ export function ownerPreferenceKey(ownerId: string, key: string): string {
   return `${ownerPreferencePrefix(ownerId)}${key}`;
 }
 
+function ownerMutationStateKey(ownerId: string): string {
+  return `${ownerMutationStatePrefix}:${ownerId.length}:${ownerId}`;
+}
+
+function parseOwnerMutationState(
+  value: string | undefined,
+): StoredOwnerMutationState {
+  if (value === undefined) return { version: 1, generation: 0 };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new OwnerMutationStateError();
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new OwnerMutationStateError();
+  }
+  const state = parsed as Record<string, unknown>;
+  const keys = Object.keys(state);
+  if (
+    (keys.length !== 2 && keys.length !== 3) ||
+    keys.some(
+      (key) =>
+        key !== "version" && key !== "generation" && key !== "activeToken",
+    ) ||
+    state.version !== 1 ||
+    !Number.isSafeInteger(state.generation) ||
+    Number(state.generation) < 0 ||
+    (state.activeToken !== undefined &&
+      (typeof state.activeToken !== "string" || state.activeToken.length === 0))
+  ) {
+    throw new OwnerMutationStateError();
+  }
+  return state as unknown as StoredOwnerMutationState;
+}
+
+export async function getOwnerMutationState(
+  ownerId: string,
+): Promise<OwnerMutationState> {
+  return db.transaction("r", db.preferences, async () => {
+    const [stored, deleted] = await Promise.all([
+      db.preferences.get(ownerMutationStateKey(ownerId)),
+      db.preferences.get(ownerPreferenceKey(ownerId, deletedOwnerMarkerKey)),
+    ]);
+    const state = parseOwnerMutationState(stored?.value);
+    return {
+      generation: state.generation,
+      ...(state.activeToken === undefined
+        ? {}
+        : { activeToken: state.activeToken }),
+      deleted: deleted !== undefined,
+    };
+  });
+}
+
+export async function beginOwnerMutation(
+  ownerId: string,
+): Promise<{ generation: number; token: string }> {
+  const token = makeId();
+  return db.transaction("rw", db.preferences, async () => {
+    const key = ownerMutationStateKey(ownerId);
+    const current = parseOwnerMutationState(
+      (await db.preferences.get(key))?.value,
+    );
+    if (current.activeToken !== undefined) {
+      throw new OwnerMutationStateError();
+    }
+    const generation = current.generation + 1;
+    if (!Number.isSafeInteger(generation)) {
+      throw new OwnerMutationStateError();
+    }
+    await db.preferences.put({
+      key,
+      value: JSON.stringify({
+        version: 1,
+        generation,
+        activeToken: token,
+      }),
+    });
+    return { generation, token };
+  });
+}
+
+export async function finishOwnerMutation(
+  ownerId: string,
+  token: string,
+): Promise<void> {
+  await db.transaction("rw", db.preferences, async () => {
+    const key = ownerMutationStateKey(ownerId);
+    const current = parseOwnerMutationState(
+      (await db.preferences.get(key))?.value,
+    );
+    if (current.activeToken !== token) {
+      throw new OwnerMutationStateError();
+    }
+    await db.preferences.put({
+      key,
+      value: JSON.stringify({
+        version: 1,
+        generation: current.generation,
+      }),
+    });
+  });
+}
+
 export async function getOwnerPreference(
   ownerId: string,
   key: string,
@@ -315,6 +440,21 @@ export async function getOperations(
     .equals(ownerId)
     .sortBy("createdAt");
   return limit === undefined ? operations : operations.slice(0, limit);
+}
+
+export async function getOperationsByIds(
+  ownerId: string,
+  operationIds: readonly string[],
+  limit?: number,
+): Promise<Array<Owned<SyncOperation>>> {
+  const selectedIds =
+    limit === undefined ? operationIds : operationIds.slice(0, limit);
+  const operations = await db.operations.bulkGet(
+    selectedIds.map((operationId) => ownerKey(ownerId, operationId)),
+  );
+  return operations.filter(
+    (operation): operation is Owned<SyncOperation> => operation !== undefined,
+  );
 }
 
 export async function clearOwnerData(

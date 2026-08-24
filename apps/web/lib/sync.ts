@@ -2,11 +2,17 @@ import {
   acknowledgeOperations,
   ANONYMOUS_OWNER_ID,
   applyRemotePage,
+  beginOwnerMutation,
   clearDeletedAccountData,
   clearOwnerData,
+  DeletedOwnerWriteError,
+  finishOwnerMutation,
   getOperations,
+  getOperationsByIds,
+  getOwnerMutationState,
   getOwnerPreference,
   type ClearOwnerDataResult,
+  type OwnerMutationState,
   type RemoteOperation,
 } from "./db";
 import {
@@ -93,6 +99,11 @@ export interface SyncDependencies {
     ownerId: string,
     limit?: number,
   ): Promise<Array<Owned<SyncOperation>>>;
+  getOperationsByIds(
+    ownerId: string,
+    operationIds: readonly string[],
+    limit?: number,
+  ): Promise<Array<Owned<SyncOperation>>>;
   acknowledgeOperations(ownerId: string, operationIds: string[]): Promise<void>;
   getPreference(ownerId: string, key: string): Promise<string | undefined>;
   applyRemotePage(
@@ -102,6 +113,11 @@ export interface SyncDependencies {
     cursor: number,
     ignoredPendingOperationIds: readonly string[],
   ): Promise<void>;
+  getOwnerMutationState(ownerId: string): Promise<OwnerMutationState>;
+  beginOwnerMutation(
+    ownerId: string,
+  ): Promise<{ generation: number; token: string }>;
+  finishOwnerMutation(ownerId: string, token: string): Promise<void>;
 }
 
 export interface OwnerLock {
@@ -345,6 +361,7 @@ function parsePullPage(
 async function runSynchronization(
   ownerId: string,
   dependencies: SyncDependencies,
+  selectedOperations?: readonly Owned<SyncOperation>[],
 ): Promise<ReadonlySet<string>> {
   if (!dependencies.isOnline()) {
     throw new Error("Synchronization requires a network connection");
@@ -360,7 +377,9 @@ async function runSynchronization(
     throw new AccountMismatchError(ownerId, actualAccount);
   }
 
-  const pending = await dependencies.getOperations(ownerId, 100);
+  const pending = selectedOperations
+    ? [...selectedOperations]
+    : await dependencies.getOperations(ownerId, 100);
   const pushedOperationIds = pending.map((item) => item.operationId);
   if (pending.length) {
     const pushResponse = await dependencies.fetch("/api/v1/sync/push", {
@@ -475,20 +494,69 @@ async function drainTransferSynchronization(
   journal: AnonymousTransferJournal,
   dependencies: SyncDependencies,
 ): Promise<void> {
+  parseBoundAnonymousTransferJournal(JSON.stringify(journal), ownerId, ownerId);
   let acknowledged = new Set(journal.acknowledgedOperationIds);
+  let firstRead = true;
   while (true) {
     const previouslyAcknowledged = acknowledged;
-    const pushedOperationIds = await runSynchronization(ownerId, dependencies);
     const stored = await readStoredTransferJournal(
       ownerId,
       journal,
       dependencies,
     );
-    acknowledged = new Set(stored.acknowledgedOperationIds);
+    const storedAcknowledged = new Set(stored.acknowledgedOperationIds);
+    if (
+      firstRead &&
+      !sameOperationIds(
+        journal.acknowledgedOperationIds,
+        stored.acknowledgedOperationIds,
+      )
+    ) {
+      throw new AnonymousTransferStateError();
+    }
+    if (
+      [...previouslyAcknowledged].some(
+        (operationId) => !storedAcknowledged.has(operationId),
+      )
+    ) {
+      throw new AnonymousTransferStateError();
+    }
+    acknowledged = storedAcknowledged;
+    firstRead = false;
+    if (
+      journal.operationIds.every((operationId) => acknowledged.has(operationId))
+    ) {
+      return;
+    }
+    const remainingOperationIds = journal.operationIds.filter(
+      (operationId) => !acknowledged.has(operationId),
+    );
+    const nextOperationIds = remainingOperationIds.slice(0, 100);
+    const nextOperations = await dependencies.getOperationsByIds(
+      ownerId,
+      nextOperationIds,
+      100,
+    );
+    if (
+      !sameOperationIds(
+        nextOperations.map(({ operationId }) => operationId),
+        nextOperationIds,
+      )
+    ) {
+      throw new AnonymousTransferStateError();
+    }
+    await runSynchronization(ownerId, dependencies, nextOperations);
+    const afterPush = await readStoredTransferJournal(
+      ownerId,
+      journal,
+      dependencies,
+    );
+    acknowledged = new Set(afterPush.acknowledgedOperationIds);
     if (
       [...previouslyAcknowledged].some(
         (operationId) => !acknowledged.has(operationId),
-      )
+      ) ||
+      acknowledged.size === previouslyAcknowledged.size
     ) {
       throw new AnonymousTransferStateError();
     }
@@ -496,32 +564,6 @@ async function drainTransferSynchronization(
       journal.operationIds.every((operationId) => acknowledged.has(operationId))
     ) {
       return;
-    }
-    const pendingOperationIds = new Set(
-      (await dependencies.getOperations(ownerId)).map(
-        ({ operationId }) => operationId,
-      ),
-    );
-    const remainingOperationIds = journal.operationIds.filter(
-      (operationId) => !acknowledged.has(operationId),
-    );
-    if (
-      remainingOperationIds.some(
-        (operationId) => !pendingOperationIds.has(operationId),
-      )
-    ) {
-      throw new AnonymousTransferStateError();
-    }
-    const pushedUnacknowledgedTransfer = journal.operationIds.some(
-      (operationId) =>
-        !previouslyAcknowledged.has(operationId) &&
-        pushedOperationIds.has(operationId),
-    );
-    if (
-      acknowledged.size === previouslyAcknowledged.size &&
-      pushedUnacknowledgedTransfer
-    ) {
-      throw new AnonymousTransferStateError();
     }
   }
 }
@@ -531,9 +573,60 @@ async function requireCompletedTransfer(
 ): Promise<void> {
   if (!transfer) return;
   const result = await transfer;
+  requireCompletedTransferResult(result);
+}
+
+function requireCompletedTransferResult(result: {
+  completed: boolean;
+  pendingCount: number;
+}): void {
   if (!result.completed) {
     throw new Error(
       `Anonymous transfer did not complete (${result.pendingCount} pending operations)`,
+    );
+  }
+}
+
+async function assertNoPersistentTransfer(
+  ownerId: string,
+  dependencies: SyncDependencies,
+): Promise<void> {
+  const [storedJournal, sourceDestinationOwnerId] = await Promise.all([
+    dependencies.getPreference(ownerId, ANONYMOUS_TRANSFER_JOURNAL_KEY),
+    dependencies.getPreference(
+      ANONYMOUS_OWNER_ID,
+      ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+    ),
+  ]);
+  if (storedJournal === undefined) {
+    if (sourceDestinationOwnerId === ownerId) {
+      throw new AnonymousTransferStateError();
+    }
+    return;
+  }
+  parseBoundAnonymousTransferJournal(
+    storedJournal,
+    ownerId,
+    sourceDestinationOwnerId,
+  );
+  throw new Error(`Anonymous transfer to ${ownerId} is still active`);
+}
+
+function assertTransferMutationState(
+  ownerId: string,
+  requested: OwnerMutationState,
+  current: OwnerMutationState,
+): void {
+  if (requested.deleted || current.deleted) {
+    throw new DeletedOwnerWriteError(ownerId);
+  }
+  if (
+    requested.activeToken !== undefined ||
+    current.activeToken !== undefined ||
+    requested.generation !== current.generation
+  ) {
+    throw new Error(
+      `Cannot transfer anonymous data after a queued mutation for ${ownerId}`,
     );
   }
 }
@@ -604,7 +697,11 @@ export function createSyncCoordinator(
       );
     }
     const transferring = transfers.get(ownerId);
-    if (transferring) return transferring.then(() => undefined);
+    if (transferring) {
+      return transferring.then((result) => {
+        requireCompletedTransferResult(result);
+      });
+    }
     return startSynchronization(ownerId);
   };
 
@@ -625,9 +722,15 @@ export function createSyncCoordinator(
         new Error(`Cannot transfer anonymous data while ${ownerId} is deleted`),
       );
     }
+    const requestedMutationState = dependencies.getOwnerMutationState(ownerId);
     let request!: Promise<{ completed: boolean; pendingCount: number }>;
     request = ownerLock
       .runExclusive(ownerId, async () => {
+        assertTransferMutationState(
+          ownerId,
+          await requestedMutationState,
+          await dependencies.getOwnerMutationState(ownerId),
+        );
         await drainOwnerSynchronization(ownerId, dependencies, () => false);
         const journal = await stage();
         await drainTransferSynchronization(ownerId, journal, dependencies);
@@ -654,15 +757,21 @@ export function createSyncCoordinator(
     let request!: Promise<ClearOwnerDataResult>;
     request = ownerLock
       .runExclusive(ownerId, async () => {
-        await requireCompletedTransfer(transferring);
-        const result = await resetOwner();
-        if (!result.cleared) return result;
+        const mutation = await dependencies.beginOwnerMutation(ownerId);
         try {
-          await runSynchronization(ownerId, dependencies);
-        } catch (error) {
-          throw new OwnerCacheRebuildError(error);
+          await requireCompletedTransfer(transferring);
+          await assertNoPersistentTransfer(ownerId, dependencies);
+          const result = await resetOwner();
+          if (!result.cleared) return result;
+          try {
+            await runSynchronization(ownerId, dependencies);
+          } catch (error) {
+            throw new OwnerCacheRebuildError(error);
+          }
+          return result;
+        } finally {
+          await dependencies.finishOwnerMutation(ownerId, mutation.token);
         }
-        return result;
       })
       .finally(() => {
         if (resets.get(ownerId) === request) resets.delete(ownerId);
@@ -682,9 +791,15 @@ export function createSyncCoordinator(
     let request!: Promise<void>;
     request = ownerLock
       .runExclusive(ownerId, async () => {
-        await requireCompletedTransfer(transferring);
-        await deleteCloud();
-        await clearLocal();
+        const mutation = await dependencies.beginOwnerMutation(ownerId);
+        try {
+          await requireCompletedTransfer(transferring);
+          await assertNoPersistentTransfer(ownerId, dependencies);
+          await deleteCloud();
+          await clearLocal();
+        } finally {
+          await dependencies.finishOwnerMutation(ownerId, mutation.token);
+        }
       })
       .finally(() => {
         if (deletions.get(ownerId) === request) deletions.delete(ownerId);
@@ -711,9 +826,13 @@ const syncCoordinator = createSyncCoordinator({
   isOnline: () => typeof navigator !== "undefined" && navigator.onLine,
   fetch: (input, init) => fetch(input, init),
   getOperations,
+  getOperationsByIds,
   acknowledgeOperations,
   getPreference: getOwnerPreference,
   applyRemotePage,
+  getOwnerMutationState,
+  beginOwnerMutation,
+  finishOwnerMutation,
 });
 
 export function synchronize(ownerId: string): Promise<void> {
