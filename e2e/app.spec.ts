@@ -214,32 +214,82 @@ test("onboarding and the empty dashboard fit a desktop viewport", async ({
 test("anonymous views and exports exclude another owner's records", async ({
   page,
 }) => {
+  const foreignOwnerId = "account:foreign-account";
+  const foreignCoffeeId = "0198f06e-1620-7000-8000-000000000001";
+  const foreignBagId = "0198f06e-1620-7000-8000-000000000002";
+  const foreignCreatedAt = "2026-08-22T12:00:00.000Z";
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await completeOnboarding(page);
 
-  await page.evaluate(async () => {
-    const database = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open("dialed-local");
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => resolve(request.result);
-    });
-    await new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction("ownedBeans", "readwrite");
-      transaction.objectStore("ownedBeans").put({
-        id: "0198f06e-1620-7000-8000-000000000001",
-        ownerId: "account:foreign-account",
-        name: "Foreign owner coffee",
-        roaster: "Partition Roasters",
-        roastLevel: "light",
-        createdAt: "2026-08-22T12:00:00.000Z",
+  const { anonymousCoffeeId, anonymousBagId } = await page.evaluate(
+    async ({
+      foreignOwnerId,
+      foreignCoffeeId,
+      foreignBagId,
+      foreignCreatedAt,
+    }) => {
+      const database = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open("dialed-local");
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve(request.result);
       });
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
-      transaction.onabort = () => reject(transaction.error);
-    });
-    database.close();
-  });
+      const ids = await new Promise<{
+        anonymousCoffeeId: string;
+        anonymousBagId: string;
+      }>((resolve, reject) => {
+        const transaction = database.transaction(
+          ["ownedCoffees", "ownedBeans"],
+          "readwrite",
+        );
+        const coffees = transaction.objectStore("ownedCoffees");
+        const bags = transaction.objectStore("ownedBeans");
+        const coffeeRecords = coffees.getAll();
+        const bagRecords = bags.getAll();
+        coffees.put({
+          id: foreignCoffeeId,
+          ownerId: foreignOwnerId,
+          name: "Foreign owner coffee",
+          roaster: "Partition Roasters",
+          roastLevel: "light",
+          createdAt: foreignCreatedAt,
+        });
+        bags.put({
+          id: foreignBagId,
+          ownerId: foreignOwnerId,
+          coffeeId: foreignCoffeeId,
+          roastedOn: "2026-08-10",
+          createdAt: foreignCreatedAt,
+        });
+        transaction.oncomplete = () => {
+          const anonymousCoffee = (
+            coffeeRecords.result as Array<{ id: string; ownerId: string }>
+          ).find((coffee) => coffee.ownerId === "anonymous");
+          const anonymousBag = (
+            bagRecords.result as Array<{ id: string; ownerId: string }>
+          ).find((bag) => bag.ownerId === "anonymous");
+          if (!anonymousCoffee || !anonymousBag) {
+            reject(new Error("Onboarding records were not persisted"));
+            return;
+          }
+          resolve({
+            anonymousCoffeeId: anonymousCoffee.id,
+            anonymousBagId: anonymousBag.id,
+          });
+        };
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
+      database.close();
+      return ids;
+    },
+    {
+      foreignOwnerId,
+      foreignCoffeeId,
+      foreignBagId,
+      foreignCreatedAt,
+    },
+  );
 
   await page.reload();
   await page.getByRole("button", { name: "Setup" }).click();
@@ -257,13 +307,19 @@ test("anonymous views and exports exclude another owner's records", async ({
   const contents = JSON.parse(
     await readFile(await download.path(), "utf8"),
   ) as {
-    coffees: Array<{ name: string }>;
+    coffees: Array<{ id: string }>;
+    bags: Array<{ id: string; coffeeId: string }>;
   };
-  expect(contents.coffees.map((coffee) => coffee.name)).toContain(
-    "Hualalai Kona",
+  expect(contents.coffees.map((coffee) => coffee.id)).toContain(
+    anonymousCoffeeId,
   );
-  expect(contents.coffees.map((coffee) => coffee.name)).not.toContain(
-    "Foreign owner coffee",
+  expect(contents.coffees.map((coffee) => coffee.id)).not.toContain(
+    foreignCoffeeId,
+  );
+  expect(contents.bags.map((bag) => bag.id)).toContain(anonymousBagId);
+  expect(contents.bags.map((bag) => bag.id)).not.toContain(foreignBagId);
+  expect(contents.bags.find((bag) => bag.id === anonymousBagId)?.coffeeId).toBe(
+    anonymousCoffeeId,
   );
 });
 
