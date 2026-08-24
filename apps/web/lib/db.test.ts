@@ -20,6 +20,7 @@ import {
   getMachines,
   getOperations,
   getOwnerPreference,
+  OwnerTransferInProgressError,
   ownerPreferenceKey,
   removeOperations,
   saveBrew,
@@ -1028,6 +1029,52 @@ describe("owner-scoped persistence", () => {
     expect(await getCoffees(bob)).toHaveLength(1);
     expect(await getOperations(ANONYMOUS_OWNER_ID)).toHaveLength(2);
     expect(await getOperations(bob)).toHaveLength(2);
+  });
+
+  it("freezes every anonymous write path during an active account transfer", async () => {
+    const coffeeRecord = coffee(
+      "0198d3a4-1111-7000-8000-000000000110",
+      "Frozen coffee",
+    );
+    const bagRecord = coffeeBag(
+      "0198d3a4-1111-7000-8000-000000000111",
+      coffeeRecord.id,
+    );
+    const machineRecord = machine("0198d3a4-1111-7000-8000-000000000112");
+    const grinderRecord = grinder("0198d3a4-1111-7000-8000-000000000113");
+    const brewRecord = brew(
+      "0198d3a4-1111-7000-8000-000000000114",
+      bagRecord.id,
+    );
+    await db.coffees.add({ ...coffeeRecord, ownerId: ANONYMOUS_OWNER_ID });
+    await db.bags.add({ ...bagRecord, ownerId: ANONYMOUS_OWNER_ID });
+    await db.brews.add({ ...brewRecord, ownerId: ANONYMOUS_OWNER_ID });
+    await setOwnerPreference(
+      ANONYMOUS_OWNER_ID,
+      "anonymous-transfer-source",
+      alice,
+    );
+
+    const writes = [
+      () => saveCoffeeWithBag(ANONYMOUS_OWNER_ID, coffeeRecord, bagRecord),
+      () => saveCoffeeBag(ANONYMOUS_OWNER_ID, bagRecord),
+      () => saveMachine(ANONYMOUS_OWNER_ID, machineRecord),
+      () => saveGrinder(ANONYMOUS_OWNER_ID, grinderRecord),
+      () => saveBrew(ANONYMOUS_OWNER_ID, brewRecord),
+      () => updateBrew(ANONYMOUS_OWNER_ID, brewRecord.id, { yield: 40 }),
+      () => deleteBrew(ANONYMOUS_OWNER_ID, brewRecord.id),
+    ];
+
+    for (const write of writes) {
+      await expect(write()).rejects.toBeInstanceOf(
+        OwnerTransferInProgressError,
+      );
+    }
+
+    await saveMachine(bob, machineRecord);
+    expect(await getMachines(bob)).toEqual([
+      expect.objectContaining({ id: machineRecord.id }),
+    ]);
   });
 
   it("does not let a stale cache reset remove a deleted-owner tombstone", async () => {

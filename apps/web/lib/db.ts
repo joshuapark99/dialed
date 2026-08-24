@@ -38,8 +38,19 @@ export class DeletedOwnerWriteError extends Error {
   }
 }
 
+export class OwnerTransferInProgressError extends Error {
+  constructor(public readonly destinationOwnerId: string) {
+    super(
+      `Anonymous data is being transferred to ${destinationOwnerId}; anonymous writes are frozen`,
+    );
+    this.name = "OwnerTransferInProgressError";
+  }
+}
+
 type OwnerScopedKey = [ownerId: string, localId: string];
 const deletedOwnerMarkerKey = "deleted-owner";
+const anonymousTransferSourceMarkerKey = "anonymous-transfer-source";
+const anonymousTransferJournalKey = "anonymous-transfer-journal";
 
 const legacyStores = {
   beans: "id, ownerId, [ownerId+createdAt], name, roaster, createdAt",
@@ -391,6 +402,12 @@ export async function clearDeletedAccountData(
 }
 
 async function assertOwnerWritable(ownerId: string): Promise<void> {
+  if (ownerId === ANONYMOUS_OWNER_ID) {
+    const transfer = await db.preferences.get(
+      ownerPreferenceKey(ownerId, anonymousTransferSourceMarkerKey),
+    );
+    if (transfer) throw new OwnerTransferInProgressError(transfer.value);
+  }
   const deleted = await db.preferences.get(
     ownerPreferenceKey(ownerId, deletedOwnerMarkerKey),
   );
@@ -619,41 +636,77 @@ export async function acknowledgeOperations(
 ): Promise<void> {
   if (!operationIds.length) return;
   const exactIds = [...new Set(operationIds)];
-  await db.transaction("rw", [db.operations, db.brews], async () => {
-    const acknowledged: Array<Owned<SyncOperation>> = [];
-    for (const operationId of exactIds) {
-      const operation = await db.operations.get(ownerKey(ownerId, operationId));
-      if (operation) acknowledged.push(operation);
-    }
-
-    await db.operations.bulkDelete(
-      acknowledged.map((operation) => ownerKey(ownerId, operation.operationId)),
-    );
-
-    const affectedBrews = new Set(
-      acknowledged
-        .filter((operation) => operation.entity === "brew")
-        .map((operation) => operation.entityId),
-    );
-    if (!affectedBrews.size) return;
-
-    const remaining = await db.operations
-      .where("ownerId")
-      .equals(ownerId)
-      .toArray();
-    for (const brewId of affectedBrews) {
-      const stillPending = remaining.some(
-        (operation) =>
-          operation.entity === "brew" && operation.entityId === brewId,
+  await db.transaction(
+    "rw",
+    [db.operations, db.brews, db.preferences],
+    async () => {
+      const journalPreferenceKey = ownerPreferenceKey(
+        ownerId,
+        anonymousTransferJournalKey,
       );
-      if (stillPending) continue;
-      const key = ownerKey(ownerId, brewId);
-      const brew = await db.brews.get(key);
-      if (brew) {
-        await db.brews.update(key, { syncState: "synced" });
+      const journalPreference = await db.preferences.get(journalPreferenceKey);
+      if (journalPreference) {
+        const journal = JSON.parse(journalPreference.value) as {
+          operationIds: string[];
+          acknowledgedOperationIds: string[];
+        };
+        const transferOperationIds = new Set(journal.operationIds);
+        const acknowledgedOperationIds = new Set(
+          journal.acknowledgedOperationIds,
+        );
+        for (const operationId of exactIds) {
+          if (transferOperationIds.has(operationId)) {
+            acknowledgedOperationIds.add(operationId);
+          }
+        }
+        await db.preferences.put({
+          key: journalPreferenceKey,
+          value: JSON.stringify({
+            ...journal,
+            acknowledgedOperationIds: [...acknowledgedOperationIds],
+          }),
+        });
       }
-    }
-  });
+
+      const acknowledged: Array<Owned<SyncOperation>> = [];
+      for (const operationId of exactIds) {
+        const operation = await db.operations.get(
+          ownerKey(ownerId, operationId),
+        );
+        if (operation) acknowledged.push(operation);
+      }
+
+      await db.operations.bulkDelete(
+        acknowledged.map((operation) =>
+          ownerKey(ownerId, operation.operationId),
+        ),
+      );
+
+      const affectedBrews = new Set(
+        acknowledged
+          .filter((operation) => operation.entity === "brew")
+          .map((operation) => operation.entityId),
+      );
+      if (!affectedBrews.size) return;
+
+      const remaining = await db.operations
+        .where("ownerId")
+        .equals(ownerId)
+        .toArray();
+      for (const brewId of affectedBrews) {
+        const stillPending = remaining.some(
+          (operation) =>
+            operation.entity === "brew" && operation.entityId === brewId,
+        );
+        if (stillPending) continue;
+        const key = ownerKey(ownerId, brewId);
+        const brew = await db.brews.get(key);
+        if (brew) {
+          await db.brews.update(key, { syncState: "synced" });
+        }
+      }
+    },
+  );
 }
 
 export interface RemoteOperation {

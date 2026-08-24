@@ -1,19 +1,33 @@
 import "fake-indexeddb/auto";
 
 import Dexie from "dexie";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ANONYMOUS_OWNER_ID,
+  acknowledgeOperations,
   db,
+  getBrews,
+  getCoffeeBags,
+  getCoffees,
+  getGrinders,
+  getMachines,
+  getOperations,
+  getOwnerPreference,
   ownerPreferenceKey,
+  removeOperations,
   setOwnerPreference,
 } from "./db";
 import type { Brew, Coffee, CoffeeBag, Grinder, Machine } from "./models";
 import {
   ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+  AnonymousTransferConflictError,
+  type AnonymousTransferJournal,
   AnonymousTransferValidationError,
+  completeAnonymousTransfer,
+  deferAnonymousTransfer,
   getAnonymousTransferOffer,
   getAnonymousTransferSummary,
+  stageAnonymousTransfer,
   validateAnonymousTransferGraph,
 } from "./anonymous-transfer";
 
@@ -104,6 +118,15 @@ async function addValidAnonymousGraph(): Promise<void> {
       ownerId: ANONYMOUS_OWNER_ID,
     },
   ]);
+}
+
+async function getJournal(
+  ownerId: string,
+): Promise<AnonymousTransferJournal | undefined> {
+  const value = await getOwnerPreference(ownerId, "anonymous-transfer-journal");
+  return value === undefined
+    ? undefined
+    : (JSON.parse(value) as AnonymousTransferJournal);
 }
 
 beforeEach(async () => {
@@ -317,5 +340,323 @@ describe("anonymous transfer discovery", () => {
       hasData: true,
     });
     expect(await db.preferences.toArray()).toEqual([]);
+  });
+});
+
+describe("anonymous transfer staging", () => {
+  it("atomically stages the complete graph in dependency order and preserves unrelated destination data", async () => {
+    await addValidAnonymousGraph();
+    await setOwnerPreference(ANONYMOUS_OWNER_ID, "onboarded", "true");
+    const unrelatedMachine = {
+      ...machine(),
+      id: "0198d3a4-1111-7000-8000-000000000020",
+      name: "Alice's existing machine",
+      ownerId: "account:alice",
+    };
+    await db.machines.add(unrelatedMachine);
+
+    const journal = await stageAnonymousTransfer("account:alice");
+
+    expect((await getCoffees("account:alice"))[0]?.id).toBe(coffeeId);
+    expect((await getCoffeeBags("account:alice"))[0]).toMatchObject({
+      id: bagId,
+      coffeeId,
+    });
+    expect((await getBrews("account:alice"))[0]?.beanId).toBe(bagId);
+    expect(await getMachines("account:alice")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: machineId }),
+        expect.objectContaining({ id: unrelatedMachine.id }),
+      ]),
+    );
+    expect((await getGrinders("account:alice"))[0]?.id).toBe(grinderId);
+    expect(journal.operationIds).toHaveLength(6);
+    expect(journal.acknowledgedOperationIds).toEqual([]);
+    const operations = await getOperations("account:alice");
+    expect(operations.map(({ operationId }) => operationId)).toEqual(
+      journal.operationIds,
+    );
+    expect(operations.map(({ entity }) => entity)).toEqual([
+      "coffee",
+      "bean",
+      "machine",
+      "grinder",
+      "brew",
+      "brew",
+    ]);
+    expect(operations.every(({ payload }) => !("ownerId" in payload!))).toBe(
+      true,
+    );
+    expect(
+      operations
+        .filter(({ entity }) => entity === "brew")
+        .every(({ payload }) => payload?.syncState === "pending"),
+    ).toBe(true);
+    expect(
+      (await getBrews("account:alice")).every(
+        ({ syncState }) => syncState === "pending",
+      ),
+    ).toBe(true);
+    expect(await getOwnerPreference("account:alice", "onboarded")).toBe("true");
+    expect(
+      await getOwnerPreference(
+        ANONYMOUS_OWNER_ID,
+        ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+      ),
+    ).toBe("account:alice");
+    expect(await getAnonymousTransferSummary()).toMatchObject({
+      hasData: true,
+    });
+  });
+
+  it("uses the validated transaction snapshot to copy the onboarding preference", async () => {
+    await addValidAnonymousGraph();
+    await setOwnerPreference(ANONYMOUS_OWNER_ID, "onboarded", "true");
+    const onboardedKey = ownerPreferenceKey(ANONYMOUS_OWNER_ID, "onboarded");
+    const preferenceGet = vi.spyOn(db.preferences, "get");
+
+    await stageAnonymousTransfer("account:alice");
+
+    expect(
+      preferenceGet.mock.calls.filter(([key]) => String(key) === onboardedKey),
+    ).toHaveLength(1);
+    expect(await getOwnerPreference("account:alice", "onboarded")).toBe("true");
+  });
+
+  it("skips same-ID semantically identical records including synced brews", async () => {
+    await addValidAnonymousGraph();
+    await db.coffees.add({ ...coffee(), ownerId: "account:alice" });
+    await db.bags.update([ANONYMOUS_OWNER_ID, bagId], {
+      legacyPairedCoffee: true,
+    });
+    await db.bags.add({
+      ...bag(),
+      legacyPairedCoffee: true,
+      ownerId: "account:alice",
+    });
+    await db.machines.add({ ...machine(), ownerId: "account:alice" });
+    await db.grinders.add({ ...grinder(), ownerId: "account:alice" });
+    const sourceBrews = await getBrews(ANONYMOUS_OWNER_ID);
+    await db.brews.bulkAdd(
+      sourceBrews.map(({ ownerId: _ownerId, ...record }) => ({
+        ...record,
+        ownerId: "account:alice",
+        syncState: "synced" as const,
+      })),
+    );
+
+    const journal = await stageAnonymousTransfer("account:alice");
+
+    expect(journal.operationIds).toEqual([]);
+    expect(await getOperations("account:alice")).toEqual([]);
+    expect(await getCoffeeBags("account:alice")).toEqual([
+      expect.objectContaining({ legacyPairedCoffee: true }),
+    ]);
+  });
+
+  it("treats legacyPairedCoffee as semantic content and writes nothing on conflict", async () => {
+    await addValidAnonymousGraph();
+    await db.bags.update([ANONYMOUS_OWNER_ID, bagId], {
+      legacyPairedCoffee: true,
+    });
+    await db.bags.add({ ...bag(), ownerId: "account:alice" });
+
+    await expect(stageAnonymousTransfer("account:alice")).rejects.toMatchObject(
+      {
+        entity: "bean",
+        entityId: bagId,
+      } satisfies Partial<AnonymousTransferConflictError>,
+    );
+
+    expect(await getCoffees("account:alice")).toEqual([]);
+    expect(await getOperations("account:alice")).toEqual([]);
+    expect(await getJournal("account:alice")).toBeUndefined();
+    expect(
+      await getOwnerPreference(
+        ANONYMOUS_OWNER_ID,
+        ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("rolls back every destination write and marker when operation insertion fails", async () => {
+    await addValidAnonymousGraph();
+    vi.spyOn(db.operations, "add").mockRejectedValueOnce(
+      new Error("queue unavailable"),
+    );
+
+    await expect(stageAnonymousTransfer("account:alice")).rejects.toThrow(
+      "queue unavailable",
+    );
+
+    expect(await getCoffees("account:alice")).toEqual([]);
+    expect(await getCoffeeBags("account:alice")).toEqual([]);
+    expect(await getMachines("account:alice")).toEqual([]);
+    expect(await getGrinders("account:alice")).toEqual([]);
+    expect(await getBrews("account:alice")).toEqual([]);
+    expect(await getOperations("account:alice")).toEqual([]);
+    expect(await getJournal("account:alice")).toBeUndefined();
+    expect(
+      await getOwnerPreference(
+        ANONYMOUS_OWNER_ID,
+        ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("reuses one journal and operation set across retries and concurrent calls", async () => {
+    await addValidAnonymousGraph();
+
+    const [first, concurrent] = await Promise.all([
+      stageAnonymousTransfer("account:alice"),
+      stageAnonymousTransfer("account:alice"),
+    ]);
+    const retry = await stageAnonymousTransfer("account:alice");
+
+    expect(concurrent).toEqual(first);
+    expect(retry).toEqual(first);
+    expect(await getOperations("account:alice")).toHaveLength(6);
+  });
+
+  it("rejects anonymous as a destination and isolates an active transfer to its owner", async () => {
+    await addValidAnonymousGraph();
+
+    await expect(stageAnonymousTransfer(ANONYMOUS_OWNER_ID)).rejects.toThrow(
+      "Anonymous data cannot be transferred to anonymous",
+    );
+    await stageAnonymousTransfer("account:alice");
+    await expect(stageAnonymousTransfer("account:bob")).rejects.toThrow(
+      "Anonymous transfer is already staged for account:alice",
+    );
+
+    expect(await getCoffees("account:bob")).toEqual([]);
+    expect(await getOperations("account:bob")).toEqual([]);
+    expect(await getJournal("account:bob")).toBeUndefined();
+  });
+});
+
+describe("anonymous transfer acknowledgement and cleanup", () => {
+  it("records acknowledgement evidence before removing a transfer operation", async () => {
+    await addValidAnonymousGraph();
+    const journal = await stageAnonymousTransfer("account:alice");
+    const operationId = journal.operationIds[0]!;
+    const realBulkDelete = db.operations.bulkDelete.bind(db.operations);
+    let journalAtDeletion: AnonymousTransferJournal | undefined;
+    vi.spyOn(db.operations, "bulkDelete").mockImplementationOnce(((
+      keys: Parameters<typeof realBulkDelete>[0],
+    ) =>
+      getJournal("account:alice").then((storedJournal) => {
+        journalAtDeletion = storedJournal;
+        return realBulkDelete(keys);
+      })) as never);
+
+    await acknowledgeOperations("account:alice", [operationId]);
+
+    expect(journalAtDeletion?.acknowledgedOperationIds).toContain(operationId);
+    expect(
+      (await getJournal("account:alice"))?.acknowledgedOperationIds,
+    ).toEqual([operationId]);
+    expect(
+      (await getOperations("account:alice")).some(
+        (operation) => operation.operationId === operationId,
+      ),
+    ).toBe(false);
+  });
+
+  it("rolls back acknowledgement evidence when operation removal fails", async () => {
+    await addValidAnonymousGraph();
+    const journal = await stageAnonymousTransfer("account:alice");
+    const operationId = journal.operationIds[0]!;
+    vi.spyOn(db.operations, "bulkDelete").mockRejectedValueOnce(
+      new Error("operation removal failed"),
+    );
+
+    await expect(
+      acknowledgeOperations("account:alice", [operationId]),
+    ).rejects.toThrow("operation removal failed");
+
+    expect(
+      (await getJournal("account:alice"))?.acknowledgedOperationIds,
+    ).toEqual([]);
+    expect(
+      (await getOperations("account:alice")).map(
+        (operation) => operation.operationId,
+      ),
+    ).toContain(operationId);
+  });
+
+  it("refuses cleanup without explicit acknowledgement evidence even if operations were removed", async () => {
+    await addValidAnonymousGraph();
+    const journal = await stageAnonymousTransfer("account:alice");
+    await removeOperations("account:alice", journal.operationIds);
+
+    await expect(completeAnonymousTransfer("account:alice")).resolves.toEqual({
+      completed: false,
+      pendingCount: journal.operationIds.length,
+    });
+    expect(await getAnonymousTransferSummary()).toMatchObject({
+      hasData: true,
+    });
+    expect(await getJournal("account:alice")).toEqual(journal);
+  });
+
+  it("cleans only anonymous data and transfer markers after every operation is acknowledged", async () => {
+    await addValidAnonymousGraph();
+    await setOwnerPreference(ANONYMOUS_OWNER_ID, "onboarded", "true");
+    await setOwnerPreference(ANONYMOUS_OWNER_ID, "unrelated", "local-only");
+    await setOwnerPreference(
+      "account:alice",
+      "anonymous-transfer-dismissed",
+      "true",
+    );
+    await setOwnerPreference("account:alice", "keep", "destination-only");
+    await db.machines.add({
+      ...machine(),
+      id: "0198d3a4-1111-7000-8000-000000000030",
+      ownerId: "account:bob",
+    });
+    const journal = await stageAnonymousTransfer("account:alice");
+
+    await acknowledgeOperations("account:alice", journal.operationIds);
+    await expect(completeAnonymousTransfer("account:alice")).resolves.toEqual({
+      completed: true,
+      pendingCount: 0,
+    });
+
+    expect(await getAnonymousTransferSummary()).toEqual({
+      coffees: 0,
+      bags: 0,
+      machines: 0,
+      grinders: 0,
+      brews: 0,
+      hasData: false,
+    });
+    expect(await getOperations(ANONYMOUS_OWNER_ID)).toEqual([]);
+    expect(await getJournal("account:alice")).toBeUndefined();
+    expect(
+      await getOwnerPreference("account:alice", "anonymous-transfer-dismissed"),
+    ).toBeUndefined();
+    expect(await getOwnerPreference("account:alice", "keep")).toBe(
+      "destination-only",
+    );
+    expect(await getCoffees("account:alice")).toHaveLength(1);
+    expect(await getMachines("account:bob")).toHaveLength(1);
+  });
+
+  it("defers only before staging and leaves transfer data unchanged", async () => {
+    await addValidAnonymousGraph();
+
+    await deferAnonymousTransfer("account:alice");
+    expect(
+      await getOwnerPreference("account:alice", "anonymous-transfer-dismissed"),
+    ).toBe("true");
+    expect(await getAnonymousTransferSummary()).toMatchObject({
+      hasData: true,
+    });
+
+    await stageAnonymousTransfer("account:alice");
+    await expect(deferAnonymousTransfer("account:alice")).rejects.toThrow(
+      "Anonymous transfer is already active for account:alice",
+    );
   });
 });
