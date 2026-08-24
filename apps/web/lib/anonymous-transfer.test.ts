@@ -2,7 +2,12 @@ import "fake-indexeddb/auto";
 
 import Dexie from "dexie";
 import { beforeEach, describe, expect, it } from "vitest";
-import { ANONYMOUS_OWNER_ID, db, ownerPreferenceKey } from "./db";
+import {
+  ANONYMOUS_OWNER_ID,
+  db,
+  ownerPreferenceKey,
+  setOwnerPreference,
+} from "./db";
 import type { Brew, Coffee, CoffeeBag, Grinder, Machine } from "./models";
 import {
   ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
@@ -13,10 +18,14 @@ import {
 } from "./anonymous-transfer";
 
 const createdAt = "2026-08-23T12:00:00.000Z";
+const coffeeId = "0198d3a4-1111-7000-8000-000000000001";
+const bagId = "0198d3a4-1111-7000-8000-000000000002";
+const machineId = "0198d3a4-1111-7000-8000-000000000003";
+const grinderId = "0198d3a4-1111-7000-8000-000000000004";
 
 function coffee(): Coffee {
   return {
-    id: "coffee-1",
+    id: coffeeId,
     name: "Hualalai Kona",
     roaster: "Coffee Purveyors",
     roastLevel: "medium",
@@ -24,13 +33,13 @@ function coffee(): Coffee {
   };
 }
 
-function bag(coffeeId = "coffee-1"): CoffeeBag {
-  return { id: "bag-1", coffeeId, createdAt };
+function bag(referencedCoffeeId = coffeeId): CoffeeBag {
+  return { id: bagId, coffeeId: referencedCoffeeId, createdAt };
 }
 
 function machine(): Machine {
   return {
-    id: "machine-1",
+    id: machineId,
     name: "Linea Mini",
     temperatureControl: "precise",
     hasPressureControl: false,
@@ -41,7 +50,7 @@ function machine(): Machine {
 
 function grinder(): Grinder {
   return {
-    id: "grinder-1",
+    id: grinderId,
     name: "P64",
     finerDirection: "lower",
     createdAt,
@@ -54,9 +63,9 @@ function brew(
 ): Brew {
   return {
     id,
-    beanId: "bag-1",
-    machineId: "machine-1",
-    grinderId: "grinder-1",
+    beanId: bagId,
+    machineId,
+    grinderId,
     dose: 18,
     yield: 36,
     duration: 28,
@@ -86,8 +95,14 @@ async function addValidAnonymousGraph(): Promise<void> {
   await db.machines.add({ ...machine(), ownerId: ANONYMOUS_OWNER_ID });
   await db.grinders.add({ ...grinder(), ownerId: ANONYMOUS_OWNER_ID });
   await db.brews.bulkAdd([
-    { ...brew("brew-1"), ownerId: ANONYMOUS_OWNER_ID },
-    { ...brew("brew-2"), ownerId: ANONYMOUS_OWNER_ID },
+    {
+      ...brew("0198d3a4-1111-7000-8000-000000000005"),
+      ownerId: ANONYMOUS_OWNER_ID,
+    },
+    {
+      ...brew("0198d3a4-1111-7000-8000-000000000006"),
+      ownerId: ANONYMOUS_OWNER_ID,
+    },
   ]);
 }
 
@@ -124,27 +139,30 @@ describe("anonymous transfer discovery", () => {
 
   it("rejects a bag whose Coffee is missing", async () => {
     await db.bags.add({
-      ...bag("missing-coffee"),
+      ...bag("0198d3a4-1111-7000-8000-000000000007"),
       ownerId: ANONYMOUS_OWNER_ID,
     });
 
     await expect(validateAnonymousTransferGraph()).rejects.toMatchObject({
       entity: "coffee",
-      entityId: "missing-coffee",
+      entityId: "0198d3a4-1111-7000-8000-000000000007",
     } satisfies Partial<AnonymousTransferValidationError>);
   });
 
   it.each([
-    ["bag", { beanId: "missing-bag" }],
-    ["machine", { machineId: "missing-machine" }],
-    ["grinder", { grinderId: "missing-grinder" }],
+    ["bag", { beanId: "0198d3a4-1111-7000-8000-000000000008" }],
+    ["machine", { machineId: "0198d3a4-1111-7000-8000-000000000009" }],
+    ["grinder", { grinderId: "0198d3a4-1111-7000-8000-000000000010" }],
   ] as const)(
     "rejects a brew whose %s is missing",
     async (entity, dependencies) => {
       await addValidAnonymousGraph();
-      await db.brews.delete([ANONYMOUS_OWNER_ID, "brew-2"]);
+      await db.brews.delete([
+        ANONYMOUS_OWNER_ID,
+        "0198d3a4-1111-7000-8000-000000000006",
+      ]);
       await db.brews.put({
-        ...brew("brew-2", dependencies),
+        ...brew("0198d3a4-1111-7000-8000-000000000006", dependencies),
         ownerId: ANONYMOUS_OWNER_ID,
       });
 
@@ -172,6 +190,97 @@ describe("anonymous transfer discovery", () => {
     expect(Object.isFrozen(snapshot.brews[0]?.taste)).toBe(true);
   });
 
+  it("captures only the transferable onboarding preference in the snapshot", async () => {
+    await addValidAnonymousGraph();
+    await setOwnerPreference(ANONYMOUS_OWNER_ID, "onboarded", "true");
+    await setOwnerPreference(ANONYMOUS_OWNER_ID, "unrelated", "keep-local");
+
+    const snapshot = await validateAnonymousTransferGraph();
+
+    expect(snapshot.onboardedPreference).toBe("true");
+    expect(snapshot).not.toHaveProperty("preferences");
+  });
+
+  it("can hand a coherent validated snapshot to a destination staging transaction", async () => {
+    await addValidAnonymousGraph();
+    let snapshot: Awaited<ReturnType<typeof validateAnonymousTransferGraph>>;
+
+    await db.transaction(
+      "rw",
+      [
+        db.coffees,
+        db.bags,
+        db.machines,
+        db.grinders,
+        db.brews,
+        db.preferences,
+        db.operations,
+      ],
+      async () => {
+        snapshot = await validateAnonymousTransferGraph();
+      },
+    );
+
+    expect(snapshot!).toMatchObject({
+      coffees: [{ id: coffeeId }],
+      bags: [{ id: bagId }],
+      machines: [{ id: machineId }],
+      grinders: [{ id: grinderId }],
+    });
+  });
+
+  it.each([
+    [
+      "coffee",
+      () => db.coffees.update([ANONYMOUS_OWNER_ID, coffeeId], { name: "" }),
+      coffeeId,
+    ],
+    [
+      "bag",
+      () =>
+        db.bags.update([ANONYMOUS_OWNER_ID, bagId], {
+          roastedOn: "not-a-date",
+        }),
+      bagId,
+    ],
+    [
+      "machine",
+      () =>
+        db.machines.update([ANONYMOUS_OWNER_ID, machineId], {
+          temperatureControl: "broken" as never,
+        }),
+      machineId,
+    ],
+    [
+      "grinder",
+      () =>
+        db.grinders.update([ANONYMOUS_OWNER_ID, grinderId], {
+          finerDirection: "sideways" as never,
+        }),
+      grinderId,
+    ],
+    [
+      "brew",
+      () =>
+        db.brews.update(
+          [ANONYMOUS_OWNER_ID, "0198d3a4-1111-7000-8000-000000000005"],
+          { dose: 0 },
+        ),
+      "0198d3a4-1111-7000-8000-000000000005",
+    ],
+  ] as const)(
+    "rejects a malformed %s before graph validation",
+    async (entity, corrupt, entityId) => {
+      await addValidAnonymousGraph();
+      await corrupt();
+
+      await expect(validateAnonymousTransferGraph()).rejects.toMatchObject({
+        entity,
+        entityId,
+      } satisfies Partial<AnonymousTransferValidationError>);
+    },
+  );
+
   it("does not offer an empty, dismissed, or differently journaled source", async () => {
     expect(await getAnonymousTransferOffer("account:alice")).toBeNull();
 
@@ -181,6 +290,10 @@ describe("anonymous transfer discovery", () => {
       value: "true",
     });
     expect(await getAnonymousTransferOffer("account:alice")).toBeNull();
+
+    await db.preferences.delete(
+      ownerPreferenceKey("account:alice", "anonymous-transfer-dismissed"),
+    );
 
     await db.preferences.put({
       key: ownerPreferenceKey(

@@ -1,4 +1,10 @@
-import { ANONYMOUS_OWNER_ID, db, getOwnerPreference } from "./db";
+import Dexie from "dexie";
+import {
+  ANONYMOUS_OWNER_ID,
+  db,
+  getOwnerPreference,
+  ownerPreferenceKey,
+} from "./db";
 import type {
   Brew,
   Coffee,
@@ -9,9 +15,11 @@ import type {
   SyncEntity,
   SyncOperation,
 } from "./models";
+import { parseRemotePayload } from "./sync-payloads";
 
 export const ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY = "anonymous-transfer-source";
 const dismissedPreferenceKey = "anonymous-transfer-dismissed";
+const transferablePreferenceKey = "onboarded";
 
 export interface AnonymousTransferSummary {
   coffees: number;
@@ -42,6 +50,7 @@ export interface AnonymousTransferSnapshot {
   grinders: ReadonlyArray<DeepReadonly<Owned<Grinder>>>;
   brews: ReadonlyArray<DeepReadonly<Owned<Brew>>>;
   operations: ReadonlyArray<DeepReadonly<Owned<SyncOperation>>>;
+  onboardedPreference?: string;
 }
 
 export class AnonymousTransferConflictError extends Error {
@@ -68,7 +77,7 @@ function cloneAndFreeze<T>(value: T): Readonly<T> {
   if (Array.isArray(value)) {
     return Object.freeze(
       value.map((item) => cloneAndFreeze(item)),
-    ) as Readonly<T>;
+    ) as unknown as Readonly<T>;
   }
   if (value !== null && typeof value === "object") {
     const copy = Object.fromEntries(
@@ -92,6 +101,7 @@ function freezeSnapshot(snapshot: {
   grinders: Array<Owned<Grinder>>;
   brews: Array<Owned<Brew>>;
   operations: Array<Owned<SyncOperation>>;
+  onboardedPreference?: string;
 }): AnonymousTransferSnapshot {
   return Object.freeze({
     coffees: freezeRecords(snapshot.coffees),
@@ -100,6 +110,7 @@ function freezeSnapshot(snapshot: {
     grinders: freezeRecords(snapshot.grinders),
     brews: freezeRecords(snapshot.brews),
     operations: freezeRecords(snapshot.operations),
+    onboardedPreference: snapshot.onboardedPreference,
   });
 }
 
@@ -143,8 +154,20 @@ export async function getAnonymousTransferOffer(
   return summary;
 }
 
-export async function validateAnonymousTransferGraph(): Promise<AnonymousTransferSnapshot> {
-  const [coffees, bags, machines, grinders, brews, operations] =
+function validateEntity(
+  entity: string,
+  syncEntity: SyncEntity,
+  record: { id: string },
+): void {
+  try {
+    parseRemotePayload(syncEntity, record);
+  } catch {
+    throw new AnonymousTransferValidationError(entity, record.id);
+  }
+}
+
+async function readValidatedAnonymousTransferSnapshot(): Promise<AnonymousTransferSnapshot> {
+  const [coffees, bags, machines, grinders, brews, operations, onboarded] =
     await Promise.all([
       db.coffees.where("ownerId").equals(ANONYMOUS_OWNER_ID).toArray(),
       db.bags.where("ownerId").equals(ANONYMOUS_OWNER_ID).toArray(),
@@ -152,7 +175,16 @@ export async function validateAnonymousTransferGraph(): Promise<AnonymousTransfe
       db.grinders.where("ownerId").equals(ANONYMOUS_OWNER_ID).toArray(),
       db.brews.where("ownerId").equals(ANONYMOUS_OWNER_ID).toArray(),
       db.operations.where("ownerId").equals(ANONYMOUS_OWNER_ID).toArray(),
+      db.preferences.get(
+        ownerPreferenceKey(ANONYMOUS_OWNER_ID, transferablePreferenceKey),
+      ),
     ]);
+
+  for (const coffee of coffees) validateEntity("coffee", "coffee", coffee);
+  for (const bag of bags) validateEntity("bag", "bean", bag);
+  for (const machine of machines) validateEntity("machine", "machine", machine);
+  for (const grinder of grinders) validateEntity("grinder", "grinder", grinder);
+  for (const brew of brews) validateEntity("brew", "brew", brew);
 
   const coffeeIds = new Set(coffees.map(({ id }) => id));
   const bagIds = new Set(bags.map(({ id }) => id));
@@ -183,5 +215,25 @@ export async function validateAnonymousTransferGraph(): Promise<AnonymousTransfe
     grinders,
     brews,
     operations,
+    onboardedPreference: onboarded?.value,
   });
+}
+
+export async function validateAnonymousTransferGraph(): Promise<AnonymousTransferSnapshot> {
+  if (Dexie.currentTransaction) {
+    return readValidatedAnonymousTransferSnapshot();
+  }
+  return db.transaction(
+    "r",
+    [
+      db.coffees,
+      db.bags,
+      db.machines,
+      db.grinders,
+      db.brews,
+      db.preferences,
+      db.operations,
+    ],
+    readValidatedAnonymousTransferSnapshot,
+  );
 }
