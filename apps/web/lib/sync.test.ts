@@ -4,13 +4,14 @@ import Dexie from "dexie";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   acknowledgeOperations as acknowledgeStoredOperations,
+  acquireOwnerMutationFence,
   ANONYMOUS_OWNER_ID,
   applyRemotePage as applyStoredRemotePage,
-  beginOwnerMutation,
   clearDeletedAccountData,
   clearOwnerData,
   db,
-  finishOwnerMutation,
+  DeletedOwnerWriteError,
+  finishOwnerMutationFence,
   getBrews,
   getCoffeeBags,
   getCoffees,
@@ -19,8 +20,16 @@ import {
   getOwnerMutationState,
   getOwnerPreference,
   ownerPreferenceKey,
+  OwnerMutationConflictError,
+  OwnerMutationFenceLostError,
   saveBrew,
   saveCoffeeWithBag,
+  verifyOwnerMutationFence,
+} from "./db";
+import type {
+  ClearOwnerDataResult,
+  OwnerMutationFence,
+  OwnerMutationKind,
 } from "./db";
 import type { Brew, Coffee, CoffeeBag, Owned, SyncOperation } from "./models";
 import {
@@ -38,6 +47,7 @@ import {
   AuthenticationExpiredError,
   createSyncCoordinator,
   createSynchronizer,
+  CrossContextOwnerLockUnavailableError,
   deleteCloudAccount,
   getCurrentUser,
   isCloudIdentityStorageEvent,
@@ -185,6 +195,7 @@ function dependencies(
   const getOperations =
     overrides.getOperations ?? vi.fn(async () => [] as Owned<SyncOperation>[]);
   let generation = 0;
+  let mutationKind: OwnerMutationKind | undefined;
   let activeToken: string | undefined;
   return {
     isOnline: () => true,
@@ -213,18 +224,48 @@ function dependencies(
     applyRemotePage: vi.fn(async () => undefined),
     getOwnerMutationState: vi.fn(async () => ({
       generation,
+      ...(mutationKind === undefined ? {} : { kind: mutationKind }),
       ...(activeToken === undefined ? {} : { activeToken }),
       deleted: false,
     })),
-    beginOwnerMutation: vi.fn(async () => {
-      generation += 1;
-      activeToken = `mutation-${generation}`;
-      return { generation, token: activeToken };
-    }),
-    finishOwnerMutation: vi.fn(async (_ownerId: string, token: string) => {
-      if (activeToken !== token) throw new Error("mutation token mismatch");
-      activeToken = undefined;
-    }),
+    acquireOwnerMutationFence: vi.fn(
+      async (_ownerId: string, kind: OwnerMutationKind) => {
+        if (
+          activeToken !== undefined &&
+          mutationKind !== undefined &&
+          mutationKind !== kind
+        ) {
+          throw new OwnerMutationConflictError(alice, mutationKind, kind);
+        }
+        generation += 1;
+        mutationKind = kind;
+        activeToken = `mutation-${generation}`;
+        return { generation, kind, token: activeToken };
+      },
+    ),
+    verifyOwnerMutationFence: vi.fn(
+      async (_ownerId: string, fence: OwnerMutationFence) => {
+        if (
+          generation !== fence.generation ||
+          mutationKind !== fence.kind ||
+          activeToken !== fence.token
+        ) {
+          throw new OwnerMutationFenceLostError(alice, fence.kind);
+        }
+      },
+    ),
+    finishOwnerMutationFence: vi.fn(
+      async (_ownerId: string, fence: OwnerMutationFence) => {
+        if (
+          generation !== fence.generation ||
+          mutationKind !== fence.kind ||
+          activeToken !== fence.token
+        ) {
+          throw new OwnerMutationFenceLostError(alice, fence.kind);
+        }
+        activeToken = undefined;
+      },
+    ),
     ...overrides,
   };
 }
@@ -232,6 +273,7 @@ function dependencies(
 function fakeOwnerLock(): OwnerLock {
   const tails = new Map<string, Promise<void>>();
   return {
+    crossContextSafe: true,
     runExclusive<T>(ownerId: string, callback: () => Promise<T>): Promise<T> {
       const preceding = tails.get(ownerId) ?? Promise.resolve();
       const result = preceding.then(callback, callback);
@@ -263,13 +305,414 @@ function storedDependencies(
     getPreference: getOwnerPreference,
     applyRemotePage: applyStoredRemotePage,
     getOwnerMutationState,
-    beginOwnerMutation,
-    finishOwnerMutation,
+    acquireOwnerMutationFence,
+    verifyOwnerMutationFence,
+    finishOwnerMutationFence,
     ...overrides,
   });
 }
 
 describe("owner-aware synchronization", () => {
+  it("allows fallback synchronization but rejects mutations before callbacks when cross-context locking is unavailable", async () => {
+    vi.stubGlobal("navigator", { onLine: true, locks: null });
+    const stage = vi.fn(async () => transferJournal());
+    const complete = vi.fn(async () => ({
+      completed: true,
+      pendingCount: 0,
+    }));
+    const resetOwner = vi.fn(async () => ({ cleared: true as const }));
+    const deleteCloud = vi.fn(async () => undefined);
+    const clearLocal = vi.fn(async () => undefined);
+    const coordinator = createSyncCoordinator(dependencies());
+
+    await expect(coordinator.synchronize(alice)).resolves.toBeUndefined();
+    await expect(
+      coordinator.transferAnonymous(alice, stage, complete),
+    ).rejects.toBeInstanceOf(CrossContextOwnerLockUnavailableError);
+    await expect(
+      coordinator.resetAndSynchronize(alice, resetOwner),
+    ).rejects.toBeInstanceOf(CrossContextOwnerLockUnavailableError);
+    await expect(
+      coordinator.deleteAccount(alice, deleteCloud, clearLocal),
+    ).rejects.toBeInstanceOf(CrossContextOwnerLockUnavailableError);
+
+    expect(stage).not.toHaveBeenCalled();
+    expect(complete).not.toHaveBeenCalled();
+    expect(resetOwner).not.toHaveBeenCalled();
+    expect(deleteCloud).not.toHaveBeenCalled();
+    expect(clearLocal).not.toHaveBeenCalled();
+  });
+
+  it("publishes a durable transfer fence before the initial destination drain", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      let markInitialDrainStarted!: () => void;
+      let releaseInitialDrain!: () => void;
+      const initialDrainStarted = new Promise<void>((resolve) => {
+        markInitialDrainStarted = resolve;
+      });
+      const initialDrainBlocked = new Promise<void>((resolve) => {
+        releaseInitialDrain = resolve;
+      });
+      const stage = vi.fn(() => stageAnonymousTransfer(alice));
+      const coordinator = createSyncCoordinator(
+        storedDependencies(async (input: string | URL | Request) => {
+          if (String(input) === "/api/v1/me") {
+            markInitialDrainStarted();
+            await initialDrainBlocked;
+            return response(200, { user: aliceAccount });
+          }
+          return response(200, {
+            operations: [],
+            cursor: 0,
+            hasMore: false,
+          });
+        }),
+        fakeOwnerLock(),
+      );
+
+      const transfer = coordinator.transferAnonymous(alice, stage, () =>
+        completeAnonymousTransfer(alice),
+      );
+      await initialDrainStarted;
+
+      expect(stage).not.toHaveBeenCalled();
+      const stateDuringInitialDrain = await getOwnerMutationState(alice);
+      releaseInitialDrain();
+      const result = await transfer.catch((error: unknown) => error);
+      expect(stateDuringInitialDrain).toMatchObject({
+        generation: 1,
+        kind: "transfer",
+        activeToken: expect.any(String),
+        deleted: false,
+      });
+      expect(result).toEqual({ completed: true, pendingCount: 0 });
+
+      expect(await getOwnerMutationState(alice)).toEqual({
+        generation: 1,
+        kind: "transfer",
+        deleted: false,
+      });
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("fences a suspended transfer after same-kind crash recovery and preserves the recovered intent", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      let markInitialDrainStarted!: () => void;
+      let releaseInitialDrain!: () => void;
+      const initialDrainStarted = new Promise<void>((resolve) => {
+        markInitialDrainStarted = resolve;
+      });
+      const initialDrainBlocked = new Promise<void>((resolve) => {
+        releaseInitialDrain = resolve;
+      });
+      const stage = vi.fn(() => stageAnonymousTransfer(alice));
+      const coordinator = createSyncCoordinator(
+        storedDependencies(async (input: string | URL | Request) => {
+          if (String(input) === "/api/v1/me") {
+            markInitialDrainStarted();
+            await initialDrainBlocked;
+            return response(200, { user: aliceAccount });
+          }
+          return response(200, {
+            operations: [],
+            cursor: 0,
+            hasMore: false,
+          });
+        }),
+        fakeOwnerLock(),
+      );
+
+      const staleTransfer = coordinator.transferAnonymous(alice, stage, () =>
+        completeAnonymousTransfer(alice),
+      );
+      await initialDrainStarted;
+      const recovered = await acquireOwnerMutationFence(alice, "transfer");
+      releaseInitialDrain();
+
+      await expect(staleTransfer).rejects.toBeInstanceOf(
+        OwnerMutationFenceLostError,
+      );
+      expect(stage).not.toHaveBeenCalled();
+      expect(await getOwnerMutationState(alice)).toEqual({
+        generation: recovered.generation,
+        kind: "transfer",
+        activeToken: recovered.token,
+        deleted: false,
+      });
+      await finishOwnerMutationFence(alice, recovered);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("reclaims a crash-stale transfer fence through a coordinator retry", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const stale = await acquireOwnerMutationFence(alice, "transfer");
+      const coordinator = createSyncCoordinator(
+        storedDependencies(),
+        fakeOwnerLock(),
+      );
+
+      await expect(
+        coordinator.transferAnonymous(
+          alice,
+          () => stageAnonymousTransfer(alice),
+          () => completeAnonymousTransfer(alice),
+        ),
+      ).resolves.toEqual({ completed: true, pendingCount: 0 });
+      expect(await getOwnerMutationState(alice)).toEqual({
+        generation: stale.generation + 1,
+        kind: "transfer",
+        deleted: false,
+      });
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("does not complete a staged transfer after its fence is recovered", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      let verifyCalls = 0;
+      let recovered!: OwnerMutationFence;
+      const complete = vi.fn(() => completeAnonymousTransfer(alice));
+      const coordinator = createSyncCoordinator(
+        storedDependencies(undefined, {
+          verifyOwnerMutationFence: async (ownerId, fence) => {
+            verifyCalls += 1;
+            if (verifyCalls === 3) {
+              recovered = await acquireOwnerMutationFence(ownerId, "transfer");
+            }
+            await verifyOwnerMutationFence(ownerId, fence);
+          },
+        }),
+        fakeOwnerLock(),
+      );
+
+      await expect(
+        coordinator.transferAnonymous(
+          alice,
+          () => stageAnonymousTransfer(alice),
+          complete,
+        ),
+      ).rejects.toBeInstanceOf(OwnerMutationFenceLostError);
+
+      expect(complete).not.toHaveBeenCalled();
+      expect(
+        await getOwnerPreference(alice, ANONYMOUS_TRANSFER_JOURNAL_KEY),
+      ).toBeDefined();
+      expect(await getOwnerMutationState(alice)).toEqual({
+        generation: recovered.generation,
+        kind: "transfer",
+        activeToken: recovered.token,
+        deleted: false,
+      });
+      await finishOwnerMutationFence(alice, recovered);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("preserves a crash-stale transfer fence when a reset coordinator requests the owner", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const transferFence = await acquireOwnerMutationFence(alice, "transfer");
+      const resetOwner = vi.fn(async () => ({ cleared: true as const }));
+      const coordinator = createSyncCoordinator(
+        storedDependencies(),
+        fakeOwnerLock(),
+      );
+
+      await expect(
+        coordinator.resetAndSynchronize(alice, resetOwner),
+      ).rejects.toBeInstanceOf(OwnerMutationConflictError);
+      expect(resetOwner).not.toHaveBeenCalled();
+      expect(await getOwnerMutationState(alice)).toEqual({
+        generation: transferFence.generation,
+        kind: "transfer",
+        activeToken: transferFence.token,
+        deleted: false,
+      });
+      await finishOwnerMutationFence(alice, transferFence);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("reclaims a crash-stale deletion fence but preserves local data when cloud retry fails", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const stale = await acquireOwnerMutationFence(alice, "delete");
+      const retryFailure = new Error(
+        "Cloud account may already be deleted; retry outcome is unknown",
+      );
+      const clearLocal = vi.fn(async () => clearDeletedAccountData(alice));
+      const coordinator = createSyncCoordinator(
+        storedDependencies(),
+        fakeOwnerLock(),
+      );
+
+      await expect(
+        coordinator.deleteAccount(
+          alice,
+          async () => {
+            throw retryFailure;
+          },
+          () => clearLocal().then(() => undefined),
+        ),
+      ).rejects.toBe(retryFailure);
+
+      expect(clearLocal).not.toHaveBeenCalled();
+      expect(await getOwnerMutationState(alice)).toEqual({
+        generation: stale.generation + 1,
+        kind: "delete",
+        deleted: false,
+      });
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it.each(["reset", "delete"] as const)(
+    "does not invoke a %s callback after its fence is recovered",
+    async (kind) => {
+      db.close();
+      await Dexie.delete("dialed-local");
+      await db.open();
+      try {
+        let recovered!: OwnerMutationFence;
+        const callback = vi.fn(async () =>
+          kind === "reset" ? { cleared: true as const } : undefined,
+        );
+        const coordinator = createSyncCoordinator(
+          storedDependencies(undefined, {
+            verifyOwnerMutationFence: async (ownerId, fence) => {
+              recovered = await acquireOwnerMutationFence(ownerId, kind);
+              await verifyOwnerMutationFence(ownerId, fence);
+            },
+          }),
+          fakeOwnerLock(),
+        );
+
+        const mutation =
+          kind === "reset"
+            ? coordinator.resetAndSynchronize(
+                alice,
+                callback as () => Promise<ClearOwnerDataResult>,
+              )
+            : coordinator.deleteAccount(
+                alice,
+                callback as () => Promise<void>,
+                vi.fn(async () => undefined),
+              );
+        await expect(mutation).rejects.toBeInstanceOf(
+          OwnerMutationFenceLostError,
+        );
+
+        expect(callback).not.toHaveBeenCalled();
+        expect(await getOwnerMutationState(alice)).toEqual({
+          generation: recovered.generation,
+          kind,
+          activeToken: recovered.token,
+          deleted: false,
+        });
+        await finishOwnerMutationFence(alice, recovered);
+      } finally {
+        db.close();
+        await Dexie.delete("dialed-local");
+      }
+    },
+  );
+
+  it("does not clear local data when deletion loses its fence after the cloud call", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      let recovered!: OwnerMutationFence;
+      const clearLocal = vi.fn(async () => clearDeletedAccountData(alice));
+      const coordinator = createSyncCoordinator(
+        storedDependencies(),
+        fakeOwnerLock(),
+      );
+
+      await expect(
+        coordinator.deleteAccount(
+          alice,
+          async () => {
+            recovered = await acquireOwnerMutationFence(alice, "delete");
+          },
+          () => clearLocal().then(() => undefined),
+        ),
+      ).rejects.toBeInstanceOf(OwnerMutationFenceLostError);
+
+      expect(clearLocal).not.toHaveBeenCalled();
+      expect(await getOwnerMutationState(alice)).toEqual({
+        generation: recovered.generation,
+        kind: "delete",
+        activeToken: recovered.token,
+        deleted: false,
+      });
+      await finishOwnerMutationFence(alice, recovered);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("fails closed without retrying cloud deletion after a local deletion tombstone", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      await clearDeletedAccountData(alice);
+      const deleteCloud = vi.fn(async () => undefined);
+      const clearLocal = vi.fn(async () => undefined);
+      const coordinator = createSyncCoordinator(
+        storedDependencies(),
+        fakeOwnerLock(),
+      );
+
+      await expect(
+        coordinator.deleteAccount(alice, deleteCloud, clearLocal),
+      ).rejects.toBeInstanceOf(DeletedOwnerWriteError);
+
+      expect(deleteCloud).not.toHaveBeenCalled();
+      expect(clearLocal).not.toHaveBeenCalled();
+      expect(await getOwnerMutationState(alice)).toEqual({
+        generation: 1,
+        kind: "delete",
+        deleted: true,
+      });
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
   it("binds account deletion to the account resolved by the UI", async () => {
     const fetch = vi.fn(
       async (_input: string | URL | Request, _init?: RequestInit) =>
@@ -833,6 +1276,7 @@ describe("owner-aware synchronization", () => {
       ).toBeUndefined();
       expect(await getOwnerMutationState(alice)).toEqual({
         generation: 1,
+        kind: "reset",
         deleted: false,
       });
     } finally {
@@ -891,6 +1335,7 @@ describe("owner-aware synchronization", () => {
       expect(stageCalls).toBe(0);
       expect(await getOwnerMutationState(alice)).toEqual({
         generation: 1,
+        kind: "delete",
         deleted: true,
       });
       expect(await getCoffees(ANONYMOUS_OWNER_ID)).toHaveLength(1);
@@ -932,6 +1377,7 @@ describe("owner-aware synchronization", () => {
       ).rejects.toBe(deletionFailure);
       expect(await getOwnerMutationState(alice)).toEqual({
         generation: 1,
+        kind: "delete",
         deleted: false,
       });
 

@@ -5,15 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ANONYMOUS_OWNER_ID,
   acknowledgeOperations,
+  acquireOwnerMutationFence,
   applyRemotePage,
   applyRemoteOperation,
-  beginOwnerMutation,
   clearDeletedAccountData,
   clearOwnerData,
   db,
   deleteBrew,
   DeletedOwnerWriteError,
   discardAnonymousData,
+  finishOwnerMutationFence,
   getBrews,
   getCoffeeBags,
   getCoffees,
@@ -25,6 +26,8 @@ import {
   getOwnerPreference,
   markBrewSynced,
   OwnerTransferInProgressError,
+  OwnerMutationConflictError,
+  OwnerMutationFenceLostError,
   ownerPreferenceKey,
   removeOperations,
   saveBrew,
@@ -33,9 +36,10 @@ import {
   saveGrinder,
   saveMachine,
   setOwnerPreference,
-  finishOwnerMutation,
   updateBrew,
+  verifyOwnerMutationFence,
 } from "./db";
+import type { OwnerMutationKind } from "./db";
 import type {
   Bean,
   Brew,
@@ -206,24 +210,77 @@ describe("owner-inclusive primary keys", () => {
       deleted: false,
     });
 
-    const first = await beginOwnerMutation(alice);
+    const first = await acquireOwnerMutationFence(alice, "reset");
     await expect(getOwnerMutationState(alice)).resolves.toEqual({
       generation: 1,
+      kind: "reset",
       activeToken: first.token,
       deleted: false,
     });
-    await finishOwnerMutation(alice, first.token);
+    await finishOwnerMutationFence(alice, first);
     await expect(getOwnerMutationState(alice)).resolves.toEqual({
       generation: 1,
+      kind: "reset",
       deleted: false,
     });
 
-    const second = await beginOwnerMutation(alice);
-    await finishOwnerMutation(alice, second.token);
+    const second = await acquireOwnerMutationFence(alice, "delete");
+    await finishOwnerMutationFence(alice, second);
     await clearDeletedAccountData(alice);
     await expect(getOwnerMutationState(alice)).resolves.toEqual({
       generation: 2,
+      kind: "delete",
       deleted: true,
+    });
+  });
+
+  it.each(["transfer", "reset", "delete"] as const)(
+    "reclaims a crash-stale %s fence without letting its old owner act or clear",
+    async (kind: OwnerMutationKind) => {
+      const stale = await acquireOwnerMutationFence(alice, kind);
+      const recovered = await acquireOwnerMutationFence(alice, kind);
+
+      expect(recovered).toMatchObject({
+        kind,
+        generation: stale.generation + 1,
+      });
+      expect(recovered.token).not.toBe(stale.token);
+      await expect(
+        verifyOwnerMutationFence(alice, stale),
+      ).rejects.toBeInstanceOf(OwnerMutationFenceLostError);
+      await expect(
+        finishOwnerMutationFence(alice, stale),
+      ).rejects.toBeInstanceOf(OwnerMutationFenceLostError);
+      await expect(getOwnerMutationState(alice)).resolves.toEqual({
+        generation: recovered.generation,
+        kind,
+        activeToken: recovered.token,
+        deleted: false,
+      });
+
+      await expect(
+        verifyOwnerMutationFence(alice, recovered),
+      ).resolves.toBeUndefined();
+      await finishOwnerMutationFence(alice, recovered);
+      await expect(getOwnerMutationState(alice)).resolves.toEqual({
+        generation: recovered.generation,
+        kind,
+        deleted: false,
+      });
+    },
+  );
+
+  it("preserves a crash-stale fence when a different mutation kind requests it", async () => {
+    const transfer = await acquireOwnerMutationFence(alice, "transfer");
+
+    await expect(
+      acquireOwnerMutationFence(alice, "reset"),
+    ).rejects.toBeInstanceOf(OwnerMutationConflictError);
+    await expect(getOwnerMutationState(alice)).resolves.toEqual({
+      generation: transfer.generation,
+      kind: "transfer",
+      activeToken: transfer.token,
+      deleted: false,
     });
   });
 

@@ -60,19 +60,54 @@ const ownerMutationStatePrefix = "owner-mutation-state";
 interface StoredOwnerMutationState {
   version: 1;
   generation: number;
+  kind?: OwnerMutationKind;
   activeToken?: string;
 }
 
+export type OwnerMutationKind = "transfer" | "reset" | "delete";
+
 export interface OwnerMutationState {
   generation: number;
+  kind?: OwnerMutationKind;
   activeToken?: string;
   deleted: boolean;
+}
+
+export interface OwnerMutationFence {
+  generation: number;
+  kind: OwnerMutationKind;
+  token: string;
 }
 
 export class OwnerMutationStateError extends Error {
   constructor() {
     super("Owner mutation state is inconsistent; local data was preserved");
     this.name = "OwnerMutationStateError";
+  }
+}
+
+export class OwnerMutationConflictError extends Error {
+  constructor(
+    public readonly ownerId: string,
+    public readonly activeKind: OwnerMutationKind,
+    public readonly requestedKind: OwnerMutationKind,
+  ) {
+    super(
+      `Cannot start ${requestedKind} for ${ownerId} while ${activeKind} recovery is pending`,
+    );
+    this.name = "OwnerMutationConflictError";
+  }
+}
+
+export class OwnerMutationFenceLostError extends Error {
+  constructor(
+    public readonly ownerId: string,
+    public readonly kind: OwnerMutationKind,
+  ) {
+    super(
+      `The ${kind} operation for ${ownerId} lost its durable mutation fence; local data was preserved`,
+    );
+    this.name = "OwnerMutationFenceLostError";
   }
 }
 
@@ -299,17 +334,29 @@ function parseOwnerMutationState(
   }
   const state = parsed as Record<string, unknown>;
   const keys = Object.keys(state);
+  const kind = state.kind;
   if (
-    (keys.length !== 2 && keys.length !== 3) ||
+    keys.length < 2 ||
+    keys.length > 4 ||
     keys.some(
       (key) =>
-        key !== "version" && key !== "generation" && key !== "activeToken",
+        key !== "version" &&
+        key !== "generation" &&
+        key !== "kind" &&
+        key !== "activeToken",
     ) ||
     state.version !== 1 ||
     !Number.isSafeInteger(state.generation) ||
     Number(state.generation) < 0 ||
+    (kind !== undefined &&
+      kind !== "transfer" &&
+      kind !== "reset" &&
+      kind !== "delete") ||
     (state.activeToken !== undefined &&
-      (typeof state.activeToken !== "string" || state.activeToken.length === 0))
+      (typeof state.activeToken !== "string" ||
+        state.activeToken.length === 0 ||
+        kind === undefined)) ||
+    (kind === undefined ? keys.length !== 2 : keys.length < 3)
   ) {
     throw new OwnerMutationStateError();
   }
@@ -327,6 +374,7 @@ export async function getOwnerMutationState(
     const state = parseOwnerMutationState(stored?.value);
     return {
       generation: state.generation,
+      ...(state.kind === undefined ? {} : { kind: state.kind }),
       ...(state.activeToken === undefined
         ? {}
         : { activeToken: state.activeToken }),
@@ -335,51 +383,83 @@ export async function getOwnerMutationState(
   });
 }
 
-export async function beginOwnerMutation(
+function assertOwnerMutationFence(
   ownerId: string,
-): Promise<{ generation: number; token: string }> {
+  current: StoredOwnerMutationState,
+  fence: OwnerMutationFence,
+): void {
+  if (
+    current.generation !== fence.generation ||
+    current.kind !== fence.kind ||
+    current.activeToken !== fence.token
+  ) {
+    throw new OwnerMutationFenceLostError(ownerId, fence.kind);
+  }
+}
+
+export async function acquireOwnerMutationFence(
+  ownerId: string,
+  kind: OwnerMutationKind,
+): Promise<OwnerMutationFence> {
   const token = makeId();
   return db.transaction("rw", db.preferences, async () => {
     const key = ownerMutationStateKey(ownerId);
     const current = parseOwnerMutationState(
       (await db.preferences.get(key))?.value,
     );
-    if (current.activeToken !== undefined) {
-      throw new OwnerMutationStateError();
+    if (
+      current.activeToken !== undefined &&
+      current.kind !== undefined &&
+      current.kind !== kind
+    ) {
+      throw new OwnerMutationConflictError(ownerId, current.kind, kind);
     }
     const generation = current.generation + 1;
     if (!Number.isSafeInteger(generation)) {
       throw new OwnerMutationStateError();
     }
+    const fence = { generation, kind, token };
     await db.preferences.put({
       key,
       value: JSON.stringify({
         version: 1,
         generation,
+        kind,
         activeToken: token,
       }),
     });
-    return { generation, token };
+    return fence;
   });
 }
 
-export async function finishOwnerMutation(
+export async function verifyOwnerMutationFence(
   ownerId: string,
-  token: string,
+  fence: OwnerMutationFence,
+): Promise<void> {
+  await db.transaction("r", db.preferences, async () => {
+    const current = parseOwnerMutationState(
+      (await db.preferences.get(ownerMutationStateKey(ownerId)))?.value,
+    );
+    assertOwnerMutationFence(ownerId, current, fence);
+  });
+}
+
+export async function finishOwnerMutationFence(
+  ownerId: string,
+  fence: OwnerMutationFence,
 ): Promise<void> {
   await db.transaction("rw", db.preferences, async () => {
     const key = ownerMutationStateKey(ownerId);
     const current = parseOwnerMutationState(
       (await db.preferences.get(key))?.value,
     );
-    if (current.activeToken !== token) {
-      throw new OwnerMutationStateError();
-    }
+    assertOwnerMutationFence(ownerId, current, fence);
     await db.preferences.put({
       key,
       value: JSON.stringify({
         version: 1,
         generation: current.generation,
+        kind: current.kind,
       }),
     });
   });

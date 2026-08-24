@@ -1,17 +1,20 @@
 import {
   acknowledgeOperations,
+  acquireOwnerMutationFence,
   ANONYMOUS_OWNER_ID,
   applyRemotePage,
-  beginOwnerMutation,
   clearDeletedAccountData,
   clearOwnerData,
   DeletedOwnerWriteError,
-  finishOwnerMutation,
+  finishOwnerMutationFence,
   getOperations,
   getOperationsByIds,
   getOwnerMutationState,
   getOwnerPreference,
+  verifyOwnerMutationFence,
   type ClearOwnerDataResult,
+  type OwnerMutationFence,
+  type OwnerMutationKind,
   type OwnerMutationState,
   type RemoteOperation,
 } from "./db";
@@ -114,14 +117,32 @@ export interface SyncDependencies {
     ignoredPendingOperationIds: readonly string[],
   ): Promise<void>;
   getOwnerMutationState(ownerId: string): Promise<OwnerMutationState>;
-  beginOwnerMutation(
+  acquireOwnerMutationFence(
     ownerId: string,
-  ): Promise<{ generation: number; token: string }>;
-  finishOwnerMutation(ownerId: string, token: string): Promise<void>;
+    kind: OwnerMutationKind,
+  ): Promise<OwnerMutationFence>;
+  verifyOwnerMutationFence(
+    ownerId: string,
+    fence: OwnerMutationFence,
+  ): Promise<void>;
+  finishOwnerMutationFence(
+    ownerId: string,
+    fence: OwnerMutationFence,
+  ): Promise<void>;
 }
 
 export interface OwnerLock {
+  readonly crossContextSafe: boolean;
   runExclusive<T>(ownerId: string, callback: () => Promise<T>): Promise<T>;
+}
+
+export class CrossContextOwnerLockUnavailableError extends Error {
+  constructor() {
+    super(
+      "This account operation requires cross-tab locking. Retry in a browser with Web Locks support.",
+    );
+    this.name = "CrossContextOwnerLockUnavailableError";
+  }
 }
 
 const fallbackLockTails = new Map<string, Promise<void>>();
@@ -146,6 +167,9 @@ function runWithFallbackLock<T>(
 }
 
 const browserOwnerLock: OwnerLock = {
+  get crossContextSafe(): boolean {
+    return typeof navigator !== "undefined" && Boolean(navigator.locks);
+  },
   runExclusive<T>(ownerId: string, callback: () => Promise<T>): Promise<T> {
     const lockManager =
       typeof navigator === "undefined" ? undefined : navigator.locks;
@@ -159,6 +183,12 @@ const browserOwnerLock: OwnerLock = {
       .then((result) => result);
   },
 };
+
+function requireCrossContextOwnerLock(ownerLock: OwnerLock): void {
+  if (!ownerLock.crossContextSafe) {
+    throw new CrossContextOwnerLockUnavailableError();
+  }
+}
 
 export async function getCurrentUser(): Promise<AccountUser | null> {
   if (localStorage.getItem(cloudEnabledKey) !== "true") return null;
@@ -621,13 +651,22 @@ function assertTransferMutationState(
     throw new DeletedOwnerWriteError(ownerId);
   }
   if (
-    requested.activeToken !== undefined ||
-    current.activeToken !== undefined ||
-    requested.generation !== current.generation
+    (requested.activeToken !== undefined && requested.kind !== "transfer") ||
+    (current.activeToken !== undefined && current.kind !== "transfer") ||
+    (requested.generation !== current.generation && current.kind !== "transfer")
   ) {
     throw new Error(
       `Cannot transfer anonymous data after a queued mutation for ${ownerId}`,
     );
+  }
+}
+
+async function assertOwnerNotDeleted(
+  ownerId: string,
+  dependencies: SyncDependencies,
+): Promise<void> {
+  if ((await dependencies.getOwnerMutationState(ownerId)).deleted) {
+    throw new DeletedOwnerWriteError(ownerId);
   }
 }
 
@@ -710,6 +749,11 @@ export function createSyncCoordinator(
     stage: () => Promise<AnonymousTransferJournal>,
     complete: () => Promise<{ completed: boolean; pendingCount: number }>,
   ): Promise<{ completed: boolean; pendingCount: number }> => {
+    try {
+      requireCrossContextOwnerLock(ownerLock);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const existing = transfers.get(ownerId);
     if (existing) return existing;
     if (resets.has(ownerId)) {
@@ -731,10 +775,22 @@ export function createSyncCoordinator(
           await requestedMutationState,
           await dependencies.getOwnerMutationState(ownerId),
         );
-        await drainOwnerSynchronization(ownerId, dependencies, () => false);
-        const journal = await stage();
-        await drainTransferSynchronization(ownerId, journal, dependencies);
-        return complete();
+        const mutation = await dependencies.acquireOwnerMutationFence(
+          ownerId,
+          "transfer",
+        );
+        try {
+          await assertOwnerNotDeleted(ownerId, dependencies);
+          await dependencies.verifyOwnerMutationFence(ownerId, mutation);
+          await drainOwnerSynchronization(ownerId, dependencies, () => false);
+          await dependencies.verifyOwnerMutationFence(ownerId, mutation);
+          const journal = await stage();
+          await drainTransferSynchronization(ownerId, journal, dependencies);
+          await dependencies.verifyOwnerMutationFence(ownerId, mutation);
+          return await complete();
+        } finally {
+          await dependencies.finishOwnerMutationFence(ownerId, mutation);
+        }
       })
       .finally(() => {
         if (transfers.get(ownerId) === request) transfers.delete(ownerId);
@@ -747,6 +803,11 @@ export function createSyncCoordinator(
     ownerId: string,
     resetOwner: () => Promise<ClearOwnerDataResult>,
   ): Promise<ClearOwnerDataResult> => {
+    try {
+      requireCrossContextOwnerLock(ownerLock);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const existing = resets.get(ownerId);
     if (existing) return existing;
     const deleting = deletions.get(ownerId);
@@ -757,12 +818,18 @@ export function createSyncCoordinator(
     let request!: Promise<ClearOwnerDataResult>;
     request = ownerLock
       .runExclusive(ownerId, async () => {
-        const mutation = await dependencies.beginOwnerMutation(ownerId);
+        const mutation = await dependencies.acquireOwnerMutationFence(
+          ownerId,
+          "reset",
+        );
         try {
           await requireCompletedTransfer(transferring);
           await assertNoPersistentTransfer(ownerId, dependencies);
+          await assertOwnerNotDeleted(ownerId, dependencies);
+          await dependencies.verifyOwnerMutationFence(ownerId, mutation);
           const result = await resetOwner();
           if (!result.cleared) return result;
+          await dependencies.verifyOwnerMutationFence(ownerId, mutation);
           try {
             await runSynchronization(ownerId, dependencies);
           } catch (error) {
@@ -770,7 +837,7 @@ export function createSyncCoordinator(
           }
           return result;
         } finally {
-          await dependencies.finishOwnerMutation(ownerId, mutation.token);
+          await dependencies.finishOwnerMutationFence(ownerId, mutation);
         }
       })
       .finally(() => {
@@ -785,20 +852,31 @@ export function createSyncCoordinator(
     deleteCloud: () => Promise<void>,
     clearLocal: () => Promise<void>,
   ): Promise<void> => {
+    try {
+      requireCrossContextOwnerLock(ownerLock);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const existing = deletions.get(ownerId);
     if (existing) return existing;
     const transferring = transfers.get(ownerId);
     let request!: Promise<void>;
     request = ownerLock
       .runExclusive(ownerId, async () => {
-        const mutation = await dependencies.beginOwnerMutation(ownerId);
+        const mutation = await dependencies.acquireOwnerMutationFence(
+          ownerId,
+          "delete",
+        );
         try {
           await requireCompletedTransfer(transferring);
           await assertNoPersistentTransfer(ownerId, dependencies);
+          await assertOwnerNotDeleted(ownerId, dependencies);
+          await dependencies.verifyOwnerMutationFence(ownerId, mutation);
           await deleteCloud();
+          await dependencies.verifyOwnerMutationFence(ownerId, mutation);
           await clearLocal();
         } finally {
-          await dependencies.finishOwnerMutation(ownerId, mutation.token);
+          await dependencies.finishOwnerMutationFence(ownerId, mutation);
         }
       })
       .finally(() => {
@@ -831,8 +909,9 @@ const syncCoordinator = createSyncCoordinator({
   getPreference: getOwnerPreference,
   applyRemotePage,
   getOwnerMutationState,
-  beginOwnerMutation,
-  finishOwnerMutation,
+  acquireOwnerMutationFence,
+  verifyOwnerMutationFence,
+  finishOwnerMutationFence,
 });
 
 export function synchronize(ownerId: string): Promise<void> {
