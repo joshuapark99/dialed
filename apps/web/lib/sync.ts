@@ -1,5 +1,6 @@
 import {
   acknowledgeOperations,
+  ANONYMOUS_OWNER_ID,
   applyRemotePage,
   clearDeletedAccountData,
   clearOwnerData,
@@ -8,6 +9,11 @@ import {
   type ClearOwnerDataResult,
   type RemoteOperation,
 } from "./db";
+import {
+  completeAnonymousTransfer,
+  stageAnonymousTransfer,
+  type AnonymousTransferJournal,
+} from "./anonymous-transfer";
 import type { AccountUser, Owned, SyncEntity, SyncOperation } from "./models";
 import {
   parseRemoteEntity,
@@ -407,8 +413,27 @@ async function runSynchronization(
   return new Set(pushedOperationIds);
 }
 
+async function drainOwnerSynchronization(
+  ownerId: string,
+  dependencies: SyncDependencies,
+  shouldStop: () => boolean,
+): Promise<void> {
+  while (true) {
+    const pushedOperationIds = await runSynchronization(ownerId, dependencies);
+    if (shouldStop()) return;
+    const [next] = await dependencies.getOperations(ownerId, 1);
+    if (shouldStop()) return;
+    if (!next || pushedOperationIds.has(next.operationId)) return;
+  }
+}
+
 export interface SyncCoordinator {
   synchronize(ownerId: string): Promise<void>;
+  transferAnonymous(
+    ownerId: string,
+    stage: () => Promise<AnonymousTransferJournal>,
+    complete: () => Promise<{ completed: boolean; pendingCount: number }>,
+  ): Promise<{ completed: boolean; pendingCount: number }>;
   resetAndSynchronize(
     ownerId: string,
     resetOwner: () => Promise<ClearOwnerDataResult>,
@@ -425,6 +450,10 @@ export function createSyncCoordinator(
   ownerLock: OwnerLock = browserOwnerLock,
 ): SyncCoordinator {
   const inFlight = new Map<string, Promise<void>>();
+  const transfers = new Map<
+    string,
+    Promise<{ completed: boolean; pendingCount: number }>
+  >();
   const resets = new Map<string, Promise<ClearOwnerDataResult>>();
   const deletions = new Map<string, Promise<void>>();
 
@@ -433,18 +462,16 @@ export function createSyncCoordinator(
     if (existing) return existing;
     let request!: Promise<void>;
     request = ownerLock
-      .runExclusive(ownerId, async () => {
-        while (true) {
-          const pushedOperationIds = await runSynchronization(
-            ownerId,
-            dependencies,
-          );
-          if (resets.has(ownerId) || deletions.has(ownerId)) return;
-          const [next] = await dependencies.getOperations(ownerId, 1);
-          if (resets.has(ownerId) || deletions.has(ownerId)) return;
-          if (!next || pushedOperationIds.has(next.operationId)) return;
-        }
-      })
+      .runExclusive(ownerId, () =>
+        drainOwnerSynchronization(
+          ownerId,
+          dependencies,
+          () =>
+            transfers.has(ownerId) ||
+            resets.has(ownerId) ||
+            deletions.has(ownerId),
+        ),
+      )
       .finally(() => {
         if (inFlight.get(ownerId) === request) inFlight.delete(ownerId);
       });
@@ -461,7 +488,31 @@ export function createSyncCoordinator(
         result.cleared ? undefined : startSynchronization(ownerId),
       );
     }
+    const transferring = transfers.get(ownerId);
+    if (transferring) return transferring.then(() => undefined);
     return startSynchronization(ownerId);
+  };
+
+  const transferAnonymous = (
+    ownerId: string,
+    stage: () => Promise<AnonymousTransferJournal>,
+    complete: () => Promise<{ completed: boolean; pendingCount: number }>,
+  ): Promise<{ completed: boolean; pendingCount: number }> => {
+    const existing = transfers.get(ownerId);
+    if (existing) return existing;
+    let request!: Promise<{ completed: boolean; pendingCount: number }>;
+    request = ownerLock
+      .runExclusive(ownerId, async () => {
+        await drainOwnerSynchronization(ownerId, dependencies, () => false);
+        await stage();
+        await drainOwnerSynchronization(ownerId, dependencies, () => false);
+        return complete();
+      })
+      .finally(() => {
+        if (transfers.get(ownerId) === request) transfers.delete(ownerId);
+      });
+    transfers.set(ownerId, request);
+    return request;
   };
 
   const resetAndSynchronize = (
@@ -513,7 +564,12 @@ export function createSyncCoordinator(
     return request;
   };
 
-  return { synchronize, resetAndSynchronize, deleteAccount };
+  return {
+    synchronize,
+    transferAnonymous,
+    resetAndSynchronize,
+    deleteAccount,
+  };
 }
 
 export function createSynchronizer(
@@ -533,6 +589,19 @@ const syncCoordinator = createSyncCoordinator({
 
 export function synchronize(ownerId: string): Promise<void> {
   return syncCoordinator.synchronize(ownerId);
+}
+
+export function moveAnonymousDataToAccount(
+  ownerId: string,
+): Promise<{ completed: boolean; pendingCount: number }> {
+  if (ownerId === ANONYMOUS_OWNER_ID) {
+    return Promise.reject(new Error("Transfer destination must be an account"));
+  }
+  return syncCoordinator.transferAnonymous(
+    ownerId,
+    () => stageAnonymousTransfer(ownerId),
+    () => completeAnonymousTransfer(ownerId),
+  );
 }
 
 export function resetAndSynchronize(

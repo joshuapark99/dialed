@@ -4,6 +4,7 @@ import Dexie from "dexie";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   acknowledgeOperations as acknowledgeStoredOperations,
+  ANONYMOUS_OWNER_ID,
   applyRemotePage as applyStoredRemotePage,
   clearOwnerData,
   db,
@@ -16,6 +17,7 @@ import {
   saveCoffeeWithBag,
 } from "./db";
 import type { Brew, Coffee, CoffeeBag, Owned, SyncOperation } from "./models";
+import type { AnonymousTransferJournal } from "./anonymous-transfer";
 import {
   AccountMismatchError,
   AuthenticationExpiredError,
@@ -24,6 +26,7 @@ import {
   deleteCloudAccount,
   getCurrentUser,
   isCloudIdentityStorageEvent,
+  moveAnonymousDataToAccount,
   OwnerCacheRebuildError,
   ownerIdForAccount,
   type SyncDependencies,
@@ -72,6 +75,20 @@ function queuedOperation(
     action: "upsert",
     payload: beanPayload(),
     createdAt,
+  };
+}
+
+function transferJournal(
+  ownerId = alice,
+  operationIds = [operationId],
+): AnonymousTransferJournal {
+  return {
+    version: 1,
+    destinationOwnerId: ownerId,
+    phase: "staged",
+    operationIds,
+    acknowledgedOperationIds: [],
+    startedAt: createdAt,
   };
 }
 
@@ -224,6 +241,423 @@ describe("owner-aware synchronization", () => {
       "/api/v1/me",
       "/api/v1/sync/pull?cursor=0",
     ]);
+  });
+
+  it("synchronizes the destination before staging and again before completing", async () => {
+    const events: string[] = [];
+    let staged = false;
+    let pending: Array<Owned<SyncOperation>> = [];
+    const transferredOperation = queuedOperation();
+    const getOperations = vi.fn(async (_ownerId: string, limit?: number) => {
+      if (limit === 100) {
+        events.push(
+          staged
+            ? "destination-sync-after-stage"
+            : "destination-sync-before-stage",
+        );
+      }
+      return limit === undefined ? pending : pending.slice(0, limit);
+    });
+    const acknowledgeOperations = vi.fn(
+      async (_ownerId: string, operationIds: string[]) => {
+        pending = pending.filter(
+          (operation) => !operationIds.includes(operation.operationId),
+        );
+      },
+    );
+    const coordinator = createSyncCoordinator(
+      dependencies({ getOperations, acknowledgeOperations }),
+      fakeOwnerLock(),
+    );
+
+    const result = await coordinator.transferAnonymous(
+      alice,
+      async () => {
+        events.push("stage");
+        staged = true;
+        pending = [transferredOperation];
+        return transferJournal();
+      },
+      async () => {
+        events.push("complete");
+        return { completed: true, pendingCount: 0 };
+      },
+    );
+
+    expect(events).toEqual([
+      "destination-sync-before-stage",
+      "stage",
+      "destination-sync-after-stage",
+      "complete",
+    ]);
+    expect(result).toEqual({ completed: true, pendingCount: 0 });
+    expect(pending).toEqual([]);
+  });
+
+  it("does not stage when the initial destination synchronization fails", async () => {
+    const syncFailure = new Error("initial sync failed");
+    const stage = vi.fn(async () => transferJournal());
+    const complete = vi.fn(async () => ({
+      completed: true,
+      pendingCount: 0,
+    }));
+    const coordinator = createSyncCoordinator(
+      dependencies({
+        fetch: vi.fn(async () => {
+          throw syncFailure;
+        }),
+      }),
+      fakeOwnerLock(),
+    );
+
+    const error = await coordinator
+      .transferAnonymous(alice, stage, complete)
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBe(syncFailure);
+    expect(stage).not.toHaveBeenCalled();
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it("retains staged source data when post-stage synchronization fails", async () => {
+    let accountChecks = 0;
+    let sourcePresent = true;
+    let journalPresent = false;
+    const postStageFailure = new Error("post-stage sync failed");
+    const stage = vi.fn(async () => {
+      journalPresent = true;
+      return transferJournal();
+    });
+    const complete = vi.fn(async () => {
+      sourcePresent = false;
+      journalPresent = false;
+      return { completed: true, pendingCount: 0 };
+    });
+    const coordinator = createSyncCoordinator(
+      dependencies({
+        fetch: vi.fn(async (input: string | URL | Request) => {
+          const url = String(input);
+          if (url === "/api/v1/me") {
+            accountChecks += 1;
+            if (accountChecks === 2) throw postStageFailure;
+            return response(200, { user: aliceAccount });
+          }
+          return response(200, { operations: [], cursor: 0, hasMore: false });
+        }),
+      }),
+      fakeOwnerLock(),
+    );
+
+    const error = await coordinator
+      .transferAnonymous(alice, stage, complete)
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBe(postStageFailure);
+    expect(stage).toHaveBeenCalledOnce();
+    expect(complete).not.toHaveBeenCalled();
+    expect(sourcePresent).toBe(true);
+    expect(journalPresent).toBe(true);
+  });
+
+  it("reuses a staged journal on retry and completes after acknowledgement", async () => {
+    const journal = transferJournal();
+    let accountChecks = 0;
+    let failPostStage = true;
+    let sourcePresent = true;
+    let journalPresent = false;
+    let journalWrites = 0;
+    let storedJournal: AnonymousTransferJournal | undefined;
+    let pending: Array<Owned<SyncOperation>> = [];
+    const getOperations = vi.fn(async (_ownerId: string, limit?: number) =>
+      limit === undefined ? pending : pending.slice(0, limit),
+    );
+    const acknowledgeOperations = vi.fn(
+      async (_ownerId: string, operationIds: string[]) => {
+        pending = pending.filter(
+          (operation) => !operationIds.includes(operation.operationId),
+        );
+      },
+    );
+    const stage = vi.fn(async () => {
+      if (!storedJournal) {
+        storedJournal = journal;
+        journalWrites += 1;
+        journalPresent = true;
+        pending = [queuedOperation()];
+      }
+      return storedJournal;
+    });
+    const complete = vi.fn(async () => {
+      if (pending.length > 0) {
+        return { completed: false, pendingCount: pending.length };
+      }
+      sourcePresent = false;
+      journalPresent = false;
+      return { completed: true, pendingCount: 0 };
+    });
+    const coordinator = createSyncCoordinator(
+      dependencies({
+        getOperations,
+        acknowledgeOperations,
+        fetch: vi.fn(async (input: string | URL | Request) => {
+          const url = String(input);
+          if (url === "/api/v1/me") {
+            accountChecks += 1;
+            if (failPostStage && accountChecks === 2) {
+              throw new Error("post-stage sync failed");
+            }
+            return response(200, { user: aliceAccount });
+          }
+          if (url === "/api/v1/sync/push") {
+            return response(200, { results: [] });
+          }
+          return response(200, { operations: [], cursor: 0, hasMore: false });
+        }),
+      }),
+      fakeOwnerLock(),
+    );
+
+    await expect(
+      coordinator.transferAnonymous(alice, stage, complete),
+    ).rejects.toThrow("post-stage sync failed");
+    expect(sourcePresent).toBe(true);
+    expect(journalPresent).toBe(true);
+
+    failPostStage = false;
+    await expect(
+      coordinator.transferAnonymous(alice, stage, complete),
+    ).resolves.toEqual({ completed: true, pendingCount: 0 });
+
+    expect(stage).toHaveBeenCalledTimes(2);
+    expect(journalWrites).toBe(1);
+    expect(acknowledgeOperations).toHaveBeenCalledWith(alice, [operationId]);
+    expect(complete).toHaveBeenCalledOnce();
+    expect(sourcePresent).toBe(false);
+    expect(journalPresent).toBe(false);
+  });
+
+  it.each([
+    new AuthenticationExpiredError("me"),
+    new AccountMismatchError(alice, bobAccount),
+  ])(
+    "propagates %s unchanged from destination synchronization",
+    async (error) => {
+      const coordinator = createSyncCoordinator(
+        dependencies({
+          fetch: vi.fn(async () => {
+            throw error;
+          }),
+        }),
+        fakeOwnerLock(),
+      );
+
+      const caught = await coordinator
+        .transferAnonymous(
+          alice,
+          async () => transferJournal(),
+          async () => ({ completed: true, pendingCount: 0 }),
+        )
+        .catch((failure: unknown) => failure);
+
+      expect(caught).toBe(error);
+    },
+  );
+
+  it("keeps a queued cache reset outside the stage-to-completion window", async () => {
+    let releasePostStageSync!: () => void;
+    let markPostStageSyncStarted!: () => void;
+    const postStageSyncBlocked = new Promise<void>((resolve) => {
+      releasePostStageSync = resolve;
+    });
+    const postStageSyncStarted = new Promise<void>((resolve) => {
+      markPostStageSyncStarted = resolve;
+    });
+    const events: string[] = [];
+    let accountChecks = 0;
+    const coordinator = createSyncCoordinator(
+      dependencies({
+        fetch: vi.fn(async (input: string | URL | Request) => {
+          const url = String(input);
+          if (url === "/api/v1/me") {
+            accountChecks += 1;
+            if (accountChecks === 2) {
+              events.push("post-stage-sync");
+              markPostStageSyncStarted();
+              await postStageSyncBlocked;
+            }
+            return response(200, { user: aliceAccount });
+          }
+          return response(200, { operations: [], cursor: 0, hasMore: false });
+        }),
+      }),
+      fakeOwnerLock(),
+    );
+    const transfer = coordinator.transferAnonymous(
+      alice,
+      async () => {
+        events.push("stage");
+        return transferJournal();
+      },
+      async () => {
+        events.push("complete");
+        return { completed: true, pendingCount: 0 };
+      },
+    );
+    await postStageSyncStarted;
+
+    const reset = coordinator.resetAndSynchronize(alice, async () => {
+      events.push("reset");
+      return {
+        cleared: false as const,
+        reason: "pending-operations" as const,
+        pendingCount: 1,
+      };
+    });
+    await Promise.resolve();
+    expect(events).toEqual(["stage", "post-stage-sync"]);
+
+    releasePostStageSync();
+    await Promise.all([transfer, reset]);
+    expect(events).toEqual(["stage", "post-stage-sync", "complete", "reset"]);
+  });
+
+  it("keeps queued account deletion outside the stage-to-completion window", async () => {
+    let releasePostStageSync!: () => void;
+    let markPostStageSyncStarted!: () => void;
+    const postStageSyncBlocked = new Promise<void>((resolve) => {
+      releasePostStageSync = resolve;
+    });
+    const postStageSyncStarted = new Promise<void>((resolve) => {
+      markPostStageSyncStarted = resolve;
+    });
+    const events: string[] = [];
+    let accountChecks = 0;
+    const coordinator = createSyncCoordinator(
+      dependencies({
+        fetch: vi.fn(async (input: string | URL | Request) => {
+          const url = String(input);
+          if (url === "/api/v1/me") {
+            accountChecks += 1;
+            if (accountChecks === 2) {
+              events.push("post-stage-sync");
+              markPostStageSyncStarted();
+              await postStageSyncBlocked;
+            }
+            return response(200, { user: aliceAccount });
+          }
+          return response(200, { operations: [], cursor: 0, hasMore: false });
+        }),
+      }),
+      fakeOwnerLock(),
+    );
+    const transfer = coordinator.transferAnonymous(
+      alice,
+      async () => {
+        events.push("stage");
+        return transferJournal();
+      },
+      async () => {
+        events.push("complete");
+        return { completed: true, pendingCount: 0 };
+      },
+    );
+    await postStageSyncStarted;
+
+    const deletion = coordinator.deleteAccount(
+      alice,
+      async () => {
+        events.push("cloud-deleted");
+      },
+      async () => {
+        events.push("local-cleared");
+      },
+    );
+    await Promise.resolve();
+    expect(events).toEqual(["stage", "post-stage-sync"]);
+
+    releasePostStageSync();
+    await Promise.all([transfer, deletion]);
+    expect(events).toEqual([
+      "stage",
+      "post-stage-sync",
+      "complete",
+      "cloud-deleted",
+      "local-cleared",
+    ]);
+  });
+
+  it("coalesces concurrent same-owner transfer callers", async () => {
+    let releaseStage!: () => void;
+    let markStageStarted!: () => void;
+    const stageBlocked = new Promise<void>((resolve) => {
+      releaseStage = resolve;
+    });
+    const stageStarted = new Promise<void>((resolve) => {
+      markStageStarted = resolve;
+    });
+    const stage = vi.fn(async () => {
+      markStageStarted();
+      await stageBlocked;
+      return transferJournal();
+    });
+    const complete = vi.fn(async () => ({
+      completed: true,
+      pendingCount: 0,
+    }));
+    const coordinator = createSyncCoordinator(dependencies(), fakeOwnerLock());
+
+    const first = coordinator.transferAnonymous(alice, stage, complete);
+    const second = coordinator.transferAnonymous(alice, stage, complete);
+
+    expect(second).toBe(first);
+    await stageStarted;
+    releaseStage();
+    await Promise.all([first, second]);
+    expect(stage).toHaveBeenCalledOnce();
+    expect(complete).toHaveBeenCalledOnce();
+  });
+
+  it("makes a normal sync join an active transfer", async () => {
+    let releaseStage!: () => void;
+    let markStageStarted!: () => void;
+    const stageBlocked = new Promise<void>((resolve) => {
+      releaseStage = resolve;
+    });
+    const stageStarted = new Promise<void>((resolve) => {
+      markStageStarted = resolve;
+    });
+    let fullQueueReads = 0;
+    const coordinator = createSyncCoordinator(
+      dependencies({
+        getOperations: vi.fn(async (_ownerId: string, limit?: number) => {
+          if (limit === 100) fullQueueReads += 1;
+          return [];
+        }),
+      }),
+      fakeOwnerLock(),
+    );
+    const transfer = coordinator.transferAnonymous(
+      alice,
+      async () => {
+        markStageStarted();
+        await stageBlocked;
+        return transferJournal();
+      },
+      async () => ({ completed: true, pendingCount: 0 }),
+    );
+    await stageStarted;
+
+    const joinedSync = coordinator.synchronize(alice);
+    releaseStage();
+    await Promise.all([transfer, joinedSync]);
+
+    expect(fullQueueReads).toBe(2);
+  });
+
+  it("rejects an anonymous transfer destination", async () => {
+    await expect(
+      moveAnonymousDataToAccount(ANONYMOUS_OWNER_ID),
+    ).rejects.toThrow("Transfer destination must be an account");
   });
 
   it("drains a tombstone that replaces the snapshotted upsert during sync", async () => {
