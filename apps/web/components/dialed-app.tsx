@@ -225,6 +225,10 @@ function OwnerApplication({
   const initializationStartedRef = useRef(false);
   const pendingSyncSchedulerRef = useRef(new PendingAccountSyncScheduler());
   const transferDiscoveryGuardRef = useRef(new TransferDiscoveryGuard(ownerId));
+  const presentedAnonymousTransferRecovery = reconcileAnonymousTransferRecovery(
+    anonymousTransferRecovery,
+    anonymousTransferSummary,
+  );
 
   const updateAccountInitialization = useCallback(
     (next: AccountInitialization) => {
@@ -456,7 +460,11 @@ function OwnerApplication({
       anonymousTransferSummary,
     );
     if (next !== current) updateAnonymousTransferRecovery(next);
-  }, [anonymousTransferSummary, updateAnonymousTransferRecovery]);
+  }, [
+    anonymousTransferRecovery,
+    anonymousTransferSummary,
+    updateAnonymousTransferRecovery,
+  ]);
 
   useEffect(() => {
     setOnline(navigator.onLine);
@@ -690,7 +698,7 @@ function OwnerApplication({
           onResetOwnerCache={resetOwnerCache}
           onAccountChanged={onAccountChanged}
           anonymousTransferSummary={anonymousTransferSummary}
-          anonymousTransferRecovery={anonymousTransferRecovery}
+          anonymousTransferRecovery={presentedAnonymousTransferRecovery}
           onMoveAnonymousData={moveAnonymousData}
         />
       );

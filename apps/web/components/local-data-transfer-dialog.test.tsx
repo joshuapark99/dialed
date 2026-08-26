@@ -1,6 +1,12 @@
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import type { AnonymousTransferSummary } from "../lib/anonymous-transfer";
+import {
+  reconcileAnonymousTransferRecovery,
+  shouldPresentAnonymousTransferOffer,
+  type AnonymousTransferRecovery,
+} from "../lib/anonymous-transfer-ui";
 import {
   LocalDataTransferDialog,
   LocalDataTransferRecoveryNotice,
@@ -17,6 +23,45 @@ const summary = {
   brews: 3,
   hasData: true,
 };
+
+function OwnerSettingsRecoveryHarness({
+  recovery,
+  liveSummary,
+  retryOpen,
+}: {
+  recovery: AnonymousTransferRecovery;
+  liveSummary: AnonymousTransferSummary | undefined;
+  retryOpen?: boolean;
+}) {
+  const currentRecovery = reconcileAnonymousTransferRecovery(
+    recovery,
+    liveSummary,
+  );
+  const globalOffer = shouldPresentAnonymousTransferOffer(
+    liveSummary?.hasData ? liveSummary : null,
+    currentRecovery,
+  );
+
+  return (
+    <main data-owner-settings="mounted">
+      {globalOffer && <p data-global-transfer-offer="open">Global offer</p>}
+      {currentRecovery && (
+        <LocalDataTransferRecoveryNotice
+          recovery={currentRecovery}
+          onRetry={() => {}}
+        />
+      )}
+      {retryOpen && currentRecovery && (
+        <LocalDataTransferDialog
+          summary={currentRecovery.summary}
+          status="offering"
+          onMove={() => {}}
+          onNotNow={() => {}}
+        />
+      )}
+    </main>
+  );
+}
 
 describe("LocalDataTransferDialog", () => {
   it("offers every nonzero entity count in an accessible consent dialog", () => {
@@ -205,5 +250,103 @@ describe("LocalDataTransferRecoveryNotice", () => {
     expect(markup).toContain("Local data move needs recovery");
     expect(markup).toContain("Another tab interrupted this local data move.");
     expect(markup).toContain("Retry local data move");
+  });
+
+  it("passes the recovery summary selected by Settings as the retry payload", () => {
+    const retrySummary = {
+      coffees: 2,
+      bags: 3,
+      machines: 0,
+      grinders: 0,
+      brews: 4,
+      hasData: true,
+    };
+    let receivedSummary: AnonymousTransferSummary | undefined;
+    const notice = LocalDataTransferRecoveryNotice({
+      recovery: {
+        summary: retrySummary,
+        message: "Local data was preserved.",
+      },
+      onRetry: (nextSummary: AnonymousTransferSummary) => {
+        receivedSummary = nextSummary;
+      },
+    });
+    const retryButton = React.Children.toArray(notice.props.children).find(
+      (child): child is React.ReactElement<{ onClick: () => void }, "button"> =>
+        React.isValidElement<{ onClick: () => void }>(child) &&
+        child.type === "button",
+    );
+
+    expect(retryButton).toBeDefined();
+    retryButton?.props.onClick();
+    expect(receivedSummary).toBe(retrySummary);
+  });
+
+  it("refreshes visible Settings counts and the retry dialog without reopening the global offer", () => {
+    const recovery = {
+      summary: {
+        coffees: 1,
+        bags: 0,
+        machines: 0,
+        grinders: 0,
+        brews: 1,
+        hasData: true,
+      },
+      message: "Local data was preserved after a pre-stage failure.",
+    } satisfies AnonymousTransferRecovery;
+    const refreshedSummary = {
+      coffees: 2,
+      bags: 3,
+      machines: 0,
+      grinders: 0,
+      brews: 4,
+      hasData: true,
+    };
+
+    const initialMarkup = renderToStaticMarkup(
+      <OwnerSettingsRecoveryHarness
+        recovery={recovery}
+        liveSummary={recovery.summary}
+      />,
+    );
+    const refreshedMarkup = renderToStaticMarkup(
+      <OwnerSettingsRecoveryHarness
+        recovery={recovery}
+        liveSummary={refreshedSummary}
+        retryOpen
+      />,
+    );
+
+    expect(initialMarkup).toContain('data-owner-settings="mounted"');
+    expect(initialMarkup).toContain("1 shot and 1 coffee");
+    expect(refreshedMarkup).toContain('data-owner-settings="mounted"');
+    expect(refreshedMarkup).toContain("4 shots, 2 coffees, and 3 bags");
+    expect(refreshedMarkup).not.toContain("1 shot and 1 coffee");
+    expect(refreshedMarkup).toContain("<dialog");
+    expect(initialMarkup).not.toContain("data-global-transfer-offer");
+    expect(refreshedMarkup).not.toContain("data-global-transfer-offer");
+  });
+
+  it("removes recovery only after authoritative source disappearance while keeping Settings mounted", () => {
+    const markup = renderToStaticMarkup(
+      <OwnerSettingsRecoveryHarness
+        recovery={{
+          summary,
+          message: "Local data was preserved.",
+        }}
+        liveSummary={{
+          coffees: 0,
+          bags: 0,
+          machines: 0,
+          grinders: 0,
+          brews: 0,
+          hasData: false,
+        }}
+      />,
+    );
+
+    expect(markup).toContain('data-owner-settings="mounted"');
+    expect(markup).not.toContain("Local data move needs recovery");
+    expect(markup).not.toContain("data-global-transfer-offer");
   });
 });

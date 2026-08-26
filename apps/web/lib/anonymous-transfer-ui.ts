@@ -99,7 +99,31 @@ export function reconcileAnonymousTransferRecovery(
   recovery: AnonymousTransferRecovery | undefined,
   summary: AnonymousTransferSummary | undefined,
 ): AnonymousTransferRecovery | undefined {
-  return summary && !summary.hasData ? undefined : recovery;
+  if (!recovery || !isCompleteAnonymousTransferSummary(summary)) {
+    return recovery;
+  }
+  if (!summary.hasData) return undefined;
+  if (recovery.summary === summary) return recovery;
+  return { summary, message: recovery.message };
+}
+
+const anonymousTransferCountKeys = [
+  "coffees",
+  "bags",
+  "machines",
+  "grinders",
+  "brews",
+] as const;
+
+function isCompleteAnonymousTransferSummary(
+  summary: AnonymousTransferSummary | undefined,
+): summary is AnonymousTransferSummary {
+  if (!summary || typeof summary.hasData !== "boolean") return false;
+  const counts = anonymousTransferCountKeys.map((key) => summary[key]);
+  return (
+    counts.every((count) => Number.isSafeInteger(count) && count >= 0) &&
+    summary.hasData === counts.some((count) => count > 0)
+  );
 }
 
 export function shouldPresentAnonymousTransferOffer(

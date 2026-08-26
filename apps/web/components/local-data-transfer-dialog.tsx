@@ -19,7 +19,7 @@ export function LocalDataTransferRecoveryNotice({
   onRetry,
 }: {
   recovery: AnonymousTransferRecovery;
-  onRetry: () => void;
+  onRetry: (summary: AnonymousTransferSummary) => void;
 }) {
   return (
     <div
@@ -28,7 +28,15 @@ export function LocalDataTransferRecoveryNotice({
     >
       <p className="font-bold">Local data move needs recovery</p>
       <p className="mt-1">{recovery.message}</p>
-      <button type="button" className="button-secondary mt-3" onClick={onRetry}>
+      <p className="mt-1">
+        {describeAnonymousTransferSummary(recovery.summary)} will be included
+        when you retry.
+      </p>
+      <button
+        type="button"
+        className="button-secondary mt-3"
+        onClick={() => onRetry(recovery.summary)}
+      >
         Retry local data move
       </button>
     </div>

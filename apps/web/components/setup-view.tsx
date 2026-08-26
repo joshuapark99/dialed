@@ -399,10 +399,10 @@ export function SetupView({
             {anonymousTransferRecovery && !transferDialogStatus && (
               <LocalDataTransferRecoveryNotice
                 recovery={anonymousTransferRecovery}
-                onRetry={() => {
+                onRetry={(summary) => {
                   setTransferError(undefined);
                   setTransferSucceeded(false);
-                  setTransferDialogSummary(anonymousTransferRecovery.summary);
+                  setTransferDialogSummary(summary);
                   setTransferDialogStatus("offering");
                 }}
               />

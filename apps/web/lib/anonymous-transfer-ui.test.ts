@@ -3,6 +3,7 @@ import {
   AnonymousTransferConflictError,
   AnonymousTransferStateError,
   AnonymousTransferValidationError,
+  type AnonymousTransferSummary,
 } from "./anonymous-transfer";
 import {
   OwnerMutationConflictError,
@@ -116,12 +117,56 @@ describe("anonymous transfer recovery", () => {
     message: "A local data move needs recovery.",
   };
 
-  it("persists through loading and live source data", () => {
+  it("replaces stale pre-stage counts from a complete positive live summary", () => {
+    const refreshedSummary = {
+      coffees: 2,
+      bags: 3,
+      machines: 1,
+      grinders: 1,
+      brews: 4,
+      hasData: true,
+    };
+
+    expect(
+      reconcileAnonymousTransferRecovery(recovery, refreshedSummary),
+    ).toEqual({
+      summary: refreshedSummary,
+      message: "A local data move needs recovery.",
+    });
+  });
+
+  it("preserves stable recovery through unavailable or incomplete live data", () => {
     expect(reconcileAnonymousTransferRecovery(recovery, undefined)).toBe(
       recovery,
     );
-    expect(reconcileAnonymousTransferRecovery(recovery, summary)).toBe(
+    expect(
+      reconcileAnonymousTransferRecovery(recovery, {
+        coffees: 7,
+        hasData: true,
+      } as AnonymousTransferSummary),
+    ).toBe(recovery);
+    expect(
+      reconcileAnonymousTransferRecovery(recovery, {
+        coffees: 0,
+        hasData: false,
+      } as AnonymousTransferSummary),
+    ).toBe(recovery);
+  });
+
+  it("adopts an unchanged post-stage frozen summary once and then stays stable", () => {
+    const frozenSummary = { ...summary };
+    const reconciled = reconcileAnonymousTransferRecovery(
       recovery,
+      frozenSummary,
+    );
+
+    expect(reconciled).toEqual({
+      summary: frozenSummary,
+      message: "A local data move needs recovery.",
+    });
+    expect(reconciled?.summary).toBe(frozenSummary);
+    expect(reconcileAnonymousTransferRecovery(reconciled, frozenSummary)).toBe(
+      reconciled,
     );
   });
 
