@@ -3,6 +3,7 @@
 import React, { useEffect, useRef } from "react";
 import { ArrowRight, LoaderCircle } from "lucide-react";
 import type { AnonymousTransferSummary } from "@/lib/anonymous-transfer";
+import type { AnonymousTransferRecovery } from "@/lib/anonymous-transfer-ui";
 
 export interface LocalDataTransferDialogProps {
   summary: AnonymousTransferSummary;
@@ -10,6 +11,28 @@ export interface LocalDataTransferDialogProps {
   error?: string;
   onMove: () => void;
   onNotNow: () => void;
+  returnFocusRef?: React.RefObject<HTMLElement | null>;
+}
+
+export function LocalDataTransferRecoveryNotice({
+  recovery,
+  onRetry,
+}: {
+  recovery: AnonymousTransferRecovery;
+  onRetry: () => void;
+}) {
+  return (
+    <div
+      role="alert"
+      className="border-t border-coral/25 bg-coral/5 p-4 text-sm text-coral"
+    >
+      <p className="font-bold">Local data move needs recovery</p>
+      <p className="mt-1">{recovery.message}</p>
+      <button type="button" className="button-secondary mt-3" onClick={onRetry}>
+        Retry local data move
+      </button>
+    </div>
+  );
 }
 
 interface ModalElement {
@@ -19,17 +42,33 @@ interface ModalElement {
 }
 
 interface FocusTarget {
+  isConnected: boolean;
   focus: () => void;
+}
+
+export function selectTransferFocusRestoreTarget<T extends FocusTarget>(
+  activeTarget: T | null | undefined,
+  bodyTarget: FocusTarget,
+): T | undefined {
+  return activeTarget?.isConnected && activeTarget !== bodyTarget
+    ? activeTarget
+    : undefined;
 }
 
 export function activateTransferModalLifecycle(
   dialog: ModalElement,
+  primaryTarget?: FocusTarget | null,
   restoreTarget?: FocusTarget | null,
+  getFallbackTarget?: () => FocusTarget | null | undefined,
 ): () => void {
   if (!dialog.open) dialog.showModal();
+  primaryTarget?.focus();
   return () => {
     if (dialog.open) dialog.close();
-    restoreTarget?.focus();
+    const target = restoreTarget?.isConnected
+      ? restoreTarget
+      : getFallbackTarget?.();
+    if (target?.isConnected) target.focus();
   };
 }
 
@@ -57,6 +96,7 @@ export function describeAnonymousTransferSummary(
     summary.grinders ? plural(summary.grinders, "grinder") : undefined,
   ].filter((item): item is string => item !== undefined);
 
+  if (counts.length === 0) return "Local data";
   if (counts.length === 1) return counts[0]!;
   if (counts.length === 2) return `${counts[0]} and ${counts[1]}`;
   return `${counts.slice(0, -1).join(", ")}, and ${counts.at(-1)}`;
@@ -68,19 +108,30 @@ export function LocalDataTransferDialog({
   error,
   onMove,
   onNotNow,
+  returnFocusRef,
 }: LocalDataTransferDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const primaryActionRef = useRef<HTMLButtonElement>(null);
   const moving = status === "moving";
 
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
-    const restoreTarget =
+    const activeTarget =
       document.activeElement instanceof HTMLElement
         ? document.activeElement
         : undefined;
-    return activateTransferModalLifecycle(dialog, restoreTarget);
-  }, []);
+    const restoreTarget = selectTransferFocusRestoreTarget(
+      activeTarget,
+      document.body,
+    );
+    return activateTransferModalLifecycle(
+      dialog,
+      primaryActionRef.current,
+      restoreTarget,
+      () => returnFocusRef?.current,
+    );
+  }, [returnFocusRef]);
 
   return (
     <dialog
@@ -132,11 +183,11 @@ export function LocalDataTransferDialog({
           Not now
         </button>
         <button
+          ref={primaryActionRef}
           type="button"
           className="button-primary"
           disabled={moving}
           onClick={onMove}
-          autoFocus
         >
           {moving ? (
             <LoaderCircle className="h-4 w-4 animate-spin" />

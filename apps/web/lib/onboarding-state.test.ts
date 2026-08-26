@@ -3,7 +3,6 @@ import {
   isRecoverableActiveTransfer,
   requiresOnboarding,
   shouldDeferAnonymousTransfer,
-  shouldSynchronizePendingOperations,
 } from "./onboarding-state";
 
 describe("onboarding readiness", () => {
@@ -76,67 +75,4 @@ describe("onboarding readiness", () => {
     );
     expect(isRecoverableActiveTransfer(undefined, "account:alice")).toBe(false);
   });
-
-  it.each([
-    {
-      name: "a new pending operation after readiness",
-      input: {
-        authenticated: true,
-        accountInitialization: "ready" as const,
-        online: true,
-        previousPendingCount: 0,
-        pendingCount: 1,
-      },
-      expected: true,
-    },
-    {
-      name: "the pending queue draining after sync",
-      input: {
-        authenticated: true,
-        accountInitialization: "ready" as const,
-        online: true,
-        previousPendingCount: 1,
-        pendingCount: 0,
-      },
-      expected: false,
-    },
-    {
-      name: "the initial pending count observation",
-      input: {
-        authenticated: true,
-        accountInitialization: "ready" as const,
-        online: true,
-        previousPendingCount: undefined,
-        pendingCount: 2,
-      },
-      expected: false,
-    },
-    {
-      name: "an offline account",
-      input: {
-        authenticated: true,
-        accountInitialization: "ready" as const,
-        online: false,
-        previousPendingCount: 0,
-        pendingCount: 1,
-      },
-      expected: false,
-    },
-    {
-      name: "account initialization before readiness",
-      input: {
-        authenticated: true,
-        accountInitialization: "checking-transfer" as const,
-        online: true,
-        previousPendingCount: 0,
-        pendingCount: 1,
-      },
-      expected: false,
-    },
-  ])(
-    "synchronizes pending operations for $name: $expected",
-    ({ input, expected }) => {
-      expect(shouldSynchronizePendingOperations(input)).toBe(expected);
-    },
-  );
 });

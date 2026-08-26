@@ -3,8 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
   LocalDataTransferDialog,
+  LocalDataTransferRecoveryNotice,
   activateTransferModalLifecycle,
   handleTransferModalCancel,
+  selectTransferFocusRestoreTarget,
 } from "./local-data-transfer-dialog";
 
 const summary = {
@@ -34,6 +36,28 @@ describe("LocalDataTransferDialog", () => {
     expect(markup).not.toContain("grinder");
     expect(markup).toContain("Move data");
     expect(markup).toContain("Not now");
+    expect(markup).not.toContain("autofocus");
+  });
+
+  it("uses safe generic copy for an empty summary", () => {
+    const markup = renderToStaticMarkup(
+      <LocalDataTransferDialog
+        summary={{
+          coffees: 0,
+          bags: 0,
+          machines: 0,
+          grinders: 0,
+          brews: 0,
+          hasData: false,
+        }}
+        status="offering"
+        onMove={() => {}}
+        onNotNow={() => {}}
+      />,
+    );
+
+    expect(markup).toContain("Local data from local mode");
+    expect(markup).not.toContain("undefined");
   });
 
   it("prevents dismissal and exposes progress while moving", () => {
@@ -89,11 +113,97 @@ describe("LocalDataTransferDialog", () => {
         this.open = false;
       },
     };
-    const restoreTarget = { focus: () => calls.push("restoreFocus") };
+    const primaryTarget = {
+      isConnected: true,
+      focus: () => calls.push("focusPrimary"),
+    };
+    const restoreTarget = {
+      isConnected: true,
+      focus: () => calls.push("restoreFocus"),
+    };
+    const fallbackTarget = {
+      isConnected: true,
+      focus: () => calls.push("fallbackFocus"),
+    };
 
-    const deactivate = activateTransferModalLifecycle(dialog, restoreTarget);
+    const deactivate = activateTransferModalLifecycle(
+      dialog,
+      primaryTarget,
+      restoreTarget,
+      () => fallbackTarget,
+    );
     deactivate();
 
-    expect(calls).toEqual(["showModal", "close", "restoreFocus"]);
+    expect(calls).toEqual([
+      "showModal",
+      "focusPrimary",
+      "close",
+      "restoreFocus",
+    ]);
+  });
+
+  it("falls back to a connected host when the opener disappears", () => {
+    const calls: string[] = [];
+    const dialog = {
+      open: false,
+      showModal() {
+        calls.push("showModal");
+        this.open = true;
+      },
+      close() {
+        calls.push("close");
+        this.open = false;
+      },
+    };
+    const disconnectedOpener = {
+      isConnected: false,
+      focus: () => calls.push("restoreFocus"),
+    };
+    const connectedFallback = {
+      isConnected: true,
+      focus: () => calls.push("fallbackFocus"),
+    };
+
+    const deactivate = activateTransferModalLifecycle(
+      dialog,
+      { isConnected: true, focus: () => calls.push("focusPrimary") },
+      disconnectedOpener,
+      () => connectedFallback,
+    );
+    deactivate();
+
+    expect(calls).toEqual([
+      "showModal",
+      "focusPrimary",
+      "close",
+      "fallbackFocus",
+    ]);
+  });
+
+  it("does not treat the document body as a meaningful opener", () => {
+    const body = { isConnected: true, focus: () => {} };
+    const button = { isConnected: true, focus: () => {} };
+
+    expect(selectTransferFocusRestoreTarget(body, body)).toBeUndefined();
+    expect(selectTransferFocusRestoreTarget(button, body)).toBe(button);
+  });
+});
+
+describe("LocalDataTransferRecoveryNotice", () => {
+  it("keeps a clear Settings retry path after the offer dialog closes", () => {
+    const markup = renderToStaticMarkup(
+      <LocalDataTransferRecoveryNotice
+        recovery={{
+          summary,
+          message: "Another tab interrupted this local data move.",
+        }}
+        onRetry={() => {}}
+      />,
+    );
+
+    expect(markup).toContain('role="alert"');
+    expect(markup).toContain("Local data move needs recovery");
+    expect(markup).toContain("Another tab interrupted this local data move.");
+    expect(markup).toContain("Retry local data move");
   });
 });

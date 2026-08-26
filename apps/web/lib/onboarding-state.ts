@@ -32,26 +32,3 @@ export function isRecoverableActiveTransfer(
 ): boolean {
   return activeDestinationOwnerId === destinationOwnerId;
 }
-
-export function shouldSynchronizePendingOperations({
-  authenticated,
-  accountInitialization,
-  online,
-  previousPendingCount,
-  pendingCount,
-}: {
-  authenticated: boolean;
-  accountInitialization:
-    "syncing" | "checking-transfer" | "offering" | "ready" | "transfer-error";
-  online: boolean;
-  previousPendingCount: number | undefined;
-  pendingCount: number;
-}): boolean {
-  return (
-    authenticated &&
-    accountInitialization === "ready" &&
-    online &&
-    previousPendingCount !== undefined &&
-    pendingCount > previousPendingCount
-  );
-}

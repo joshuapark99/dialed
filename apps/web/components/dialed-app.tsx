@@ -14,14 +14,19 @@ import {
 } from "lucide-react";
 import {
   ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
-  AnonymousTransferConflictError,
-  AnonymousTransferStateError,
-  AnonymousTransferValidationError,
   deferAnonymousTransfer,
   getAnonymousTransferOffer,
   getAnonymousTransferSummary,
   type AnonymousTransferSummary,
 } from "@/lib/anonymous-transfer";
+import {
+  PendingAccountSyncScheduler,
+  TransferDiscoveryGuard,
+  anonymousTransferErrorMessage,
+  reconcileAnonymousTransferRecovery,
+  shouldPresentAnonymousTransferOffer,
+  type AnonymousTransferRecovery,
+} from "@/lib/anonymous-transfer-ui";
 import {
   ANONYMOUS_OWNER_ID,
   db,
@@ -38,12 +43,10 @@ import {
   isRecoverableActiveTransfer,
   requiresOnboarding,
   shouldDeferAnonymousTransfer,
-  shouldSynchronizePendingOperations,
 } from "@/lib/onboarding-state";
 import {
   AccountMismatchError,
   AuthenticationExpiredError,
-  CrossContextOwnerLockUnavailableError,
   getCurrentUser,
   isCloudIdentityStorageEvent,
   moveAnonymousDataToAccount,
@@ -84,6 +87,8 @@ const navItems = [
 ];
 
 export function DialedApp() {
+  const applicationFocusRef = useRef<HTMLDivElement>(null);
+  const activeOwnerIdRef = useRef<string | undefined>(undefined);
   const [accountState, setAccountState] = useState<
     | { status: "loading" }
     | { status: "error" }
@@ -91,14 +96,22 @@ export function DialedApp() {
   >({ status: "loading" });
 
   const refreshAccount = useCallback(async () => {
+    activeOwnerIdRef.current = undefined;
     setAccountState({ status: "loading" });
     try {
       const account = await getCurrentUser();
+      activeOwnerIdRef.current = account
+        ? ownerIdForAccount(account.id)
+        : ANONYMOUS_OWNER_ID;
       setAccountState({ status: "resolved", account });
     } catch {
       setAccountState({ status: "error" });
     }
   }, []);
+  const isOwnerCurrent = useCallback(
+    (ownerId: string) => activeOwnerIdRef.current === ownerId,
+    [],
+  );
 
   useEffect(() => {
     void refreshAccount();
@@ -112,20 +125,35 @@ export function DialedApp() {
     return () => window.removeEventListener("storage", refreshChangedIdentity);
   }, [refreshAccount]);
 
-  if (accountState.status === "loading") return <Loading />;
-  if (accountState.status === "error") {
-    return <AccountLookupError onRetry={refreshAccount} />;
+  let content;
+  if (accountState.status === "loading") {
+    content = <Loading />;
+  } else if (accountState.status === "error") {
+    content = <AccountLookupError onRetry={refreshAccount} />;
+  } else {
+    const { account } = accountState;
+    const ownerId = account
+      ? ownerIdForAccount(account.id)
+      : ANONYMOUS_OWNER_ID;
+    content = (
+      <OwnerApplication
+        key={ownerId}
+        ownerId={ownerId}
+        account={account}
+        onAccountChanged={refreshAccount}
+        isOwnerCurrent={isOwnerCurrent}
+        returnFocusRef={applicationFocusRef}
+      />
+    );
   }
-
-  const { account } = accountState;
-  const ownerId = account ? ownerIdForAccount(account.id) : ANONYMOUS_OWNER_ID;
   return (
-    <OwnerApplication
-      key={ownerId}
-      ownerId={ownerId}
-      account={account}
-      onAccountChanged={refreshAccount}
-    />
+    <div
+      ref={applicationFocusRef}
+      tabIndex={-1}
+      className="min-h-dvh outline-none"
+    >
+      {content}
+    </div>
   );
 }
 
@@ -133,10 +161,14 @@ function OwnerApplication({
   ownerId,
   account,
   onAccountChanged,
+  isOwnerCurrent,
+  returnFocusRef,
 }: {
   ownerId: string;
   account: AccountUser | null;
   onAccountChanged: () => Promise<void>;
+  isOwnerCurrent: (ownerId: string) => boolean;
+  returnFocusRef: React.RefObject<HTMLElement | null>;
 }) {
   const coffees = useLiveQuery(
     async () => (await getCoffees(ownerId)).reverse(),
@@ -182,15 +214,33 @@ function OwnerApplication({
     useState<AccountInitialization>(
       account ? { status: "syncing" } : { status: "ready" },
     );
-  const [movingInitialTransfer, setMovingInitialTransfer] = useState(false);
+  const [transferInFlight, setTransferInFlight] = useState(false);
+  const [anonymousTransferRecovery, setAnonymousTransferRecovery] =
+    useState<AnonymousTransferRecovery>();
   const accountInitializationRef = useRef(accountInitialization);
+  const transferInFlightRef = useRef(false);
+  const anonymousTransferRecoveryRef = useRef<
+    AnonymousTransferRecovery | undefined
+  >(undefined);
   const initializationStartedRef = useRef(false);
-  const previousPendingCountRef = useRef<number | undefined>(undefined);
+  const pendingSyncSchedulerRef = useRef(new PendingAccountSyncScheduler());
+  const transferDiscoveryGuardRef = useRef(new TransferDiscoveryGuard(ownerId));
 
   const updateAccountInitialization = useCallback(
     (next: AccountInitialization) => {
       accountInitializationRef.current = next;
       setAccountInitialization(next);
+    },
+    [],
+  );
+  const updateTransferInFlight = useCallback((next: boolean) => {
+    transferInFlightRef.current = next;
+    setTransferInFlight(next);
+  }, []);
+  const updateAnonymousTransferRecovery = useCallback(
+    (next: AnonymousTransferRecovery | undefined) => {
+      anonymousTransferRecoveryRef.current = next;
+      setAnonymousTransferRecovery(next);
     },
     [],
   );
@@ -231,64 +281,126 @@ function OwnerApplication({
     }
   }, [account, onAccountChanged, ownerId]);
 
-  const discoverTransferOffer = useCallback(async () => {
-    updateAccountInitialization({ status: "checking-transfer" });
-    try {
-      let summary = await getAnonymousTransferOffer(ownerId);
-      if (!summary) {
-        const activeDestinationOwnerId = await getOwnerPreference(
-          ANONYMOUS_OWNER_ID,
-          ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
-        );
-        if (isRecoverableActiveTransfer(activeDestinationOwnerId, ownerId)) {
-          const activeSummary = await getAnonymousTransferSummary();
-          if (activeSummary.hasData) summary = activeSummary;
-        }
+  const discoverTransferOffer = useCallback(
+    async (
+      ticket: ReturnType<TransferDiscoveryGuard["beginDiscovery"]>,
+      mode: "initial" | "background",
+    ) => {
+      const guard = transferDiscoveryGuardRef.current;
+      if (!isOwnerCurrent(ownerId) || !guard.canCommit(ticket, ownerId)) return;
+      if (mode === "initial") {
+        updateAccountInitialization({ status: "checking-transfer" });
       }
-      updateAccountInitialization(
-        summary ? { status: "offering", summary } : { status: "ready" },
-      );
-    } catch {
-      setSyncStatus("error");
-      updateAccountInitialization({ status: "ready" });
-    }
-  }, [ownerId, updateAccountInitialization]);
+      try {
+        let summary = await getAnonymousTransferOffer(ownerId);
+        if (!summary) {
+          const activeDestinationOwnerId = await getOwnerPreference(
+            ANONYMOUS_OWNER_ID,
+            ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+          );
+          if (isRecoverableActiveTransfer(activeDestinationOwnerId, ownerId)) {
+            const activeSummary = await getAnonymousTransferSummary();
+            if (activeSummary.hasData) summary = activeSummary;
+          }
+        }
+        if (!isOwnerCurrent(ownerId) || !guard.canCommit(ticket, ownerId)) {
+          return;
+        }
+        updateAccountInitialization(
+          shouldPresentAnonymousTransferOffer(
+            summary,
+            anonymousTransferRecoveryRef.current,
+          )
+            ? { status: "offering", summary }
+            : { status: "ready" },
+        );
+      } catch {
+        if (!isOwnerCurrent(ownerId) || !guard.canCommit(ticket, ownerId)) {
+          return;
+        }
+        setSyncStatus("error");
+        updateAccountInitialization({ status: "ready" });
+      }
+    },
+    [isOwnerCurrent, ownerId, updateAccountInitialization],
+  );
 
-  const syncAndDiscoverTransfer = useCallback(async () => {
-    const result = await runSync();
-    if (result === "success") await discoverTransferOffer();
-    return result;
-  }, [discoverTransferOffer, runSync]);
+  const syncAndDiscoverTransfer = useCallback(
+    async (mode: "initial" | "background" = "background") => {
+      if (mode === "background" && transferInFlightRef.current) {
+        return "unavailable" as const;
+      }
+      const guard = transferDiscoveryGuardRef.current;
+      const ticket = guard.beginDiscovery();
+      const result = await runSync();
+      if (result === "success") {
+        await discoverTransferOffer(ticket, mode);
+      } else if (
+        mode === "initial" &&
+        result === "unavailable" &&
+        isOwnerCurrent(ownerId) &&
+        guard.canCommit(ticket, ownerId)
+      ) {
+        updateAccountInitialization({ status: "ready" });
+      }
+      return result;
+    },
+    [
+      discoverTransferOffer,
+      isOwnerCurrent,
+      ownerId,
+      runSync,
+      updateAccountInitialization,
+    ],
+  );
 
   const syncFromUi = useCallback(
     async () => (await syncAndDiscoverTransfer()) === "success",
     [syncAndDiscoverTransfer],
   );
 
-  const moveAnonymousData = useCallback(async () => {
-    if (!account) throw new Error("Transfer destination must be an account");
-    setSyncStatus("syncing");
-    try {
-      const result = await moveAnonymousDataToAccount(ownerId);
-      if (!result.completed) {
-        throw new Error(
-          `Local data is still syncing (${result.pendingCount} pending). Try again.`,
-        );
+  const moveAnonymousData = useCallback(
+    async (summary: AnonymousTransferSummary) => {
+      if (!account) throw new Error("Transfer destination must be an account");
+      const guard = transferDiscoveryGuardRef.current;
+      guard.beginTransfer();
+      updateTransferInFlight(true);
+      setSyncStatus("syncing");
+      try {
+        const result = await moveAnonymousDataToAccount(ownerId);
+        if (!result.completed) {
+          throw new Error(
+            `Local data is still syncing (${result.pendingCount} pending). Try again.`,
+          );
+        }
+        updateAnonymousTransferRecovery(undefined);
+        setSyncStatus("synced");
+      } catch (error) {
+        if (
+          error instanceof AuthenticationExpiredError ||
+          error instanceof AccountMismatchError
+        ) {
+          setSyncStatus("local");
+          await onAccountChanged();
+          throw error;
+        }
+        const message = anonymousTransferErrorMessage(error);
+        updateAnonymousTransferRecovery({ summary, message });
+        setSyncStatus("error");
+        throw new Error(message, { cause: error });
+      } finally {
+        guard.finishTransfer();
+        updateTransferInFlight(false);
       }
-      setSyncStatus("synced");
-    } catch (error) {
-      if (
-        error instanceof AuthenticationExpiredError ||
-        error instanceof AccountMismatchError
-      ) {
-        setSyncStatus("local");
-        await onAccountChanged();
-        throw error;
-      }
-      setSyncStatus("error");
-      throw new Error(anonymousTransferErrorMessage(error), { cause: error });
-    }
-  }, [account, onAccountChanged, ownerId]);
+    },
+    [
+      account,
+      onAccountChanged,
+      ownerId,
+      updateAnonymousTransferRecovery,
+      updateTransferInFlight,
+    ],
+  );
 
   const resetOwnerCache = useCallback(async (): Promise<
     OwnerCacheResetResult | undefined
@@ -334,21 +446,17 @@ function OwnerApplication({
   useEffect(() => {
     if (!loaded || !account || initializationStartedRef.current) return;
     initializationStartedRef.current = true;
-    void (async () => {
-      const result = await runSync();
-      if (result === "success") {
-        await discoverTransferOffer();
-      } else if (result === "unavailable") {
-        updateAccountInitialization({ status: "ready" });
-      }
-    })();
-  }, [
-    account,
-    discoverTransferOffer,
-    loaded,
-    runSync,
-    updateAccountInitialization,
-  ]);
+    void syncAndDiscoverTransfer("initial");
+  }, [account, loaded, syncAndDiscoverTransfer]);
+
+  useEffect(() => {
+    const current = anonymousTransferRecoveryRef.current;
+    const next = reconcileAnonymousTransferRecovery(
+      current,
+      anonymousTransferSummary,
+    );
+    if (next !== current) updateAnonymousTransferRecovery(next);
+  }, [anonymousTransferSummary, updateAnonymousTransferRecovery]);
 
   useEffect(() => {
     setOnline(navigator.onLine);
@@ -358,6 +466,7 @@ function OwnerApplication({
       if (
         nextOnline &&
         account &&
+        !transferInFlightRef.current &&
         accountInitializationRef.current.status === "ready"
       ) {
         void syncAndDiscoverTransfer();
@@ -374,7 +483,10 @@ function OwnerApplication({
   useEffect(() => {
     if (!account) return;
     const onFocus = () => {
-      if (accountInitializationRef.current.status === "ready") {
+      if (
+        !transferInFlightRef.current &&
+        accountInitializationRef.current.status === "ready"
+      ) {
         void syncAndDiscoverTransfer();
       }
     };
@@ -384,32 +496,36 @@ function OwnerApplication({
 
   useEffect(() => {
     if (pendingCount === undefined) return;
-    const previousPendingCount = previousPendingCountRef.current;
-    previousPendingCountRef.current = pendingCount;
     if (
-      shouldSynchronizePendingOperations({
+      pendingSyncSchedulerRef.current.observe({
         authenticated: Boolean(account),
-        accountInitialization: accountInitializationRef.current.status,
+        ready: accountInitialization.status === "ready",
         online,
-        previousPendingCount,
+        transferInFlight,
         pendingCount,
       })
     ) {
       void syncAndDiscoverTransfer();
     }
-  }, [account, online, pendingCount, syncAndDiscoverTransfer]);
+  }, [
+    account,
+    accountInitialization.status,
+    online,
+    pendingCount,
+    syncAndDiscoverTransfer,
+    transferInFlight,
+  ]);
 
   async function startInitialTransfer() {
     if (
-      movingInitialTransfer ||
+      transferInFlightRef.current ||
       (accountInitialization.status !== "offering" &&
         accountInitialization.status !== "transfer-error")
     )
       return;
     const summary = accountInitialization.summary;
-    setMovingInitialTransfer(true);
     try {
-      await moveAnonymousData();
+      await moveAnonymousData(summary);
       updateAccountInitialization({ status: "ready" });
     } catch (error) {
       if (
@@ -425,29 +541,38 @@ function OwnerApplication({
             ? error.message
             : "Local data was preserved. Try the move again.",
       });
-    } finally {
-      setMovingInitialTransfer(false);
     }
   }
 
   async function dismissInitialTransfer() {
-    if (movingInitialTransfer) return;
+    if (transferInFlightRef.current) return;
+    transferDiscoveryGuardRef.current.invalidate();
     if (
       accountInitialization.status === "transfer-error" &&
       !shouldDeferAnonymousTransfer(accountInitialization.status)
     ) {
+      updateAnonymousTransferRecovery({
+        summary: accountInitialization.summary,
+        message: accountInitialization.message,
+      });
       updateAccountInitialization({ status: "ready" });
       return;
     }
     if (accountInitialization.status !== "offering") return;
     try {
       await deferAnonymousTransfer(ownerId);
+      updateAnonymousTransferRecovery(undefined);
       updateAccountInitialization({ status: "ready" });
     } catch (error) {
+      const message = anonymousTransferErrorMessage(error);
+      updateAnonymousTransferRecovery({
+        summary: accountInitialization.summary,
+        message,
+      });
       updateAccountInitialization({
         status: "transfer-error",
         summary: accountInitialization.summary,
-        message: anonymousTransferErrorMessage(error),
+        message,
       });
     }
   }
@@ -467,7 +592,7 @@ function OwnerApplication({
       <LocalDataTransferDialog
         summary={accountInitialization.summary}
         status={
-          movingInitialTransfer
+          transferInFlight
             ? "moving"
             : accountInitialization.status === "transfer-error"
               ? "error"
@@ -480,6 +605,7 @@ function OwnerApplication({
         }
         onMove={() => void startInitialTransfer()}
         onNotNow={() => void dismissInitialTransfer()}
+        returnFocusRef={returnFocusRef}
       />
     );
   }
@@ -564,6 +690,7 @@ function OwnerApplication({
           onResetOwnerCache={resetOwnerCache}
           onAccountChanged={onAccountChanged}
           anonymousTransferSummary={anonymousTransferSummary}
+          anonymousTransferRecovery={anonymousTransferRecovery}
           onMoveAnonymousData={moveAnonymousData}
         />
       );
@@ -761,21 +888,4 @@ function compactStatusLabel(
   if (syncStatus === "error") return "Sync error";
   if (syncStatus === "local") return "Not synced";
   return pendingCount ? `${pendingCount} pending` : "Synced";
-}
-
-function anonymousTransferErrorMessage(error: unknown): string {
-  const retry = " Local data was preserved. Select Retry move to try again.";
-  if (
-    error instanceof AnonymousTransferStateError ||
-    error instanceof CrossContextOwnerLockUnavailableError
-  ) {
-    return `${error.message}${retry}`;
-  }
-  if (error instanceof AnonymousTransferConflictError) {
-    return `Local ${error.entity} data conflicts with this account.${retry}`;
-  }
-  if (error instanceof AnonymousTransferValidationError) {
-    return `Local ${error.entity} data is incomplete and could not be moved.${retry}`;
-  }
-  return `Dialed could not move local data. Check the connection and try again.${retry}`;
 }
