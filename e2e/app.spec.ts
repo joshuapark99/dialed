@@ -1,6 +1,544 @@
 import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 
+const accountOwnerId = "account:alice";
+const transferFixture = {
+  coffeeId: "0198f06e-1620-7000-8000-000000000301",
+  bagId: "0198f06e-1620-7000-8000-000000000302",
+  machineId: "0198f06e-1620-7000-8000-000000000303",
+  grinderId: "0198f06e-1620-7000-8000-000000000304",
+  firstBrewId: "0198f06e-1620-7000-8000-000000000305",
+  secondBrewId: "0198f06e-1620-7000-8000-000000000306",
+  createdAt: "2026-08-22T12:00:00.000Z",
+};
+
+type PushedOperation = {
+  operationId: string;
+  entity: string;
+  entityId: string;
+  payload?: Record<string, unknown>;
+};
+
+async function putTransferRecords(
+  page: Page,
+  options: { anonymous?: boolean; destinationConflict?: boolean } = {},
+) {
+  await page.evaluate(
+    async ({ accountOwnerId, fixture, options }) => {
+      const database = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open("dialed-local");
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve(request.result);
+      });
+      const transaction = database.transaction(
+        [
+          "ownedCoffees",
+          "ownedBeans",
+          "ownedMachines",
+          "ownedGrinders",
+          "ownedBrews",
+        ],
+        "readwrite",
+      );
+      const coffees = transaction.objectStore("ownedCoffees");
+      const bags = transaction.objectStore("ownedBeans");
+      const machines = transaction.objectStore("ownedMachines");
+      const grinders = transaction.objectStore("ownedGrinders");
+      const brews = transaction.objectStore("ownedBrews");
+      const accountCreatedAt = "2026-08-21T12:00:00.000Z";
+
+      coffees.put({
+        ownerId: accountOwnerId,
+        id: "0198f06e-1620-7000-8000-000000000351",
+        name: "Account coffee",
+        roaster: "Account Roasters",
+        roastLevel: "medium",
+        createdAt: accountCreatedAt,
+      });
+      bags.put({
+        ownerId: accountOwnerId,
+        id: "0198f06e-1620-7000-8000-000000000352",
+        coffeeId: "0198f06e-1620-7000-8000-000000000351",
+        createdAt: accountCreatedAt,
+      });
+      machines.put({
+        ownerId: accountOwnerId,
+        id: "0198f06e-1620-7000-8000-000000000353",
+        name: "Account machine",
+        temperatureControl: "none",
+        hasPressureControl: false,
+        hasPreinfusion: false,
+        createdAt: accountCreatedAt,
+      });
+      grinders.put({
+        ownerId: accountOwnerId,
+        id: "0198f06e-1620-7000-8000-000000000354",
+        name: "Account grinder",
+        finerDirection: "lower",
+        createdAt: accountCreatedAt,
+      });
+
+      if (options.destinationConflict) {
+        coffees.put({
+          ownerId: accountOwnerId,
+          id: fixture.coffeeId,
+          name: "Destination conflict coffee",
+          roaster: "Different Roaster",
+          roastLevel: "dark",
+          createdAt: fixture.createdAt,
+        });
+      }
+      if (options.anonymous ?? true) {
+        coffees.put({
+          ownerId: "anonymous",
+          id: fixture.coffeeId,
+          name: "Anonymous coffee",
+          roaster: "Anonymous Roasters",
+          roastLevel: "light",
+          createdAt: fixture.createdAt,
+        });
+        bags.put({
+          ownerId: "anonymous",
+          id: fixture.bagId,
+          coffeeId: fixture.coffeeId,
+          legacyPairedCoffee: true,
+          createdAt: fixture.createdAt,
+        });
+        machines.put({
+          ownerId: "anonymous",
+          id: fixture.machineId,
+          name: "Anonymous machine",
+          temperatureControl: "relative",
+          hasPressureControl: true,
+          hasPreinfusion: true,
+          createdAt: fixture.createdAt,
+        });
+        grinders.put({
+          ownerId: "anonymous",
+          id: fixture.grinderId,
+          name: "Anonymous grinder",
+          finerDirection: "lower",
+          createdAt: fixture.createdAt,
+        });
+        for (const [id, grind] of [
+          [fixture.firstBrewId, "0.8"],
+          [fixture.secondBrewId, "0.9"],
+        ]) {
+          brews.put({
+            ownerId: "anonymous",
+            id,
+            beanId: fixture.bagId,
+            machineId: fixture.machineId,
+            grinderId: fixture.grinderId,
+            dose: 18,
+            yield: 36,
+            duration: 28,
+            grind,
+            taste: {
+              acidity: 3,
+              bitterness: 3,
+              strength: 3,
+              body: 3,
+              enjoyment: 3,
+            },
+            ratio: 2,
+            flow: 1.29,
+            recommendation: {
+              variable: "hold",
+              direction: "hold",
+              headline: "Keep it steady",
+              rationale: "The shot is balanced.",
+              expectedEffect: "Maintain the result.",
+              confidence: "high",
+              ruleVersion: "web-1",
+            },
+            createdAt: fixture.createdAt,
+            updatedAt: fixture.createdAt,
+            syncState: "local",
+          });
+        }
+      }
+      await new Promise<void>((resolve, reject) => {
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
+      database.close();
+    },
+    { accountOwnerId, fixture: transferFixture, options },
+  );
+}
+
+async function transferRecords(page: Page) {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("dialed-local");
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result);
+    });
+    const stores = [
+      "ownedCoffees",
+      "ownedBeans",
+      "ownedMachines",
+      "ownedGrinders",
+      "ownedBrews",
+      "ownedOperations",
+    ];
+    const transaction = database.transaction(stores, "readonly");
+    const requests = Object.fromEntries(
+      stores.map((store) => [store, transaction.objectStore(store).getAll()]),
+    ) as Record<string, IDBRequest<Array<Record<string, unknown>>>>;
+    const records = await new Promise<
+      Record<string, Array<Record<string, unknown>>>
+    >((resolve, reject) => {
+      transaction.oncomplete = () =>
+        resolve(
+          Object.fromEntries(
+            stores.map((store) => [store, requests[store]!.result]),
+          ),
+        );
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+    return records;
+  });
+}
+
+async function mockAuthenticatedTransferRoutes(
+  page: Page,
+  pushed: PushedOperation[],
+  pushStatus: () => number | Promise<number> = () => 200,
+) {
+  await page.addInitScript(() => {
+    localStorage.setItem("dialed-cloud-enabled", "true");
+  });
+  await page.route("**/api/v1/me", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        user: { id: "alice", email: "alice@example.com", name: "Alice" },
+      }),
+    });
+  });
+  await page.route("**/api/v1/sync/pull**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ operations: [], cursor: 0, hasMore: false }),
+    });
+  });
+  await page.route("**/api/v1/sync/push", async (route) => {
+    const body = route.request().postDataJSON() as {
+      operations: PushedOperation[];
+    };
+    pushed.push(...body.operations);
+    const status = await pushStatus();
+    await route.fulfill({
+      status,
+      contentType: "application/json",
+      body: JSON.stringify(
+        status === 200 ? { results: [] } : { error: "unavailable" },
+      ),
+    });
+  });
+}
+
+async function openTransferOffer(page: Page, pushed: PushedOperation[]) {
+  await mockAuthenticatedTransferRoutes(page, pushed);
+  await page.goto("/");
+  await putTransferRecords(page);
+  await page.reload();
+  const dialog = page.getByRole("dialog", { name: /move local data/i });
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+test("moves anonymous data only after refreshed consent", async ({ page }) => {
+  const pushed: PushedOperation[] = [];
+  const dialog = await openTransferOffer(page, pushed);
+
+  await expect(
+    dialog.getByText(/2 shots.*1 coffee.*1 machine.*1 grinder/i),
+  ).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Move data" })).toBeFocused();
+
+  await page.evaluate(async ({ secondBrewId }) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("dialed-local");
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result);
+    });
+    const transaction = database.transaction("ownedBrews", "readwrite");
+    const store = transaction.objectStore("ownedBrews");
+    const source = await new Promise<Record<string, unknown>>(
+      (resolve, reject) => {
+        const request = store.get(["anonymous", secondBrewId]);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () =>
+          resolve(request.result as Record<string, unknown>);
+      },
+    );
+    store.put({
+      ...source,
+      id: "0198f06e-1620-7000-8000-000000000307",
+      grind: "1.0",
+    });
+    await new Promise<void>((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+  }, transferFixture);
+
+  await dialog.getByRole("button", { name: "Move data" }).click();
+  await expect(dialog).toHaveCount(1);
+  await expect(dialog.getByText(/3 shots/i)).toBeVisible();
+  await expect(dialog.getByText(/nothing was moved/i)).toBeVisible();
+  await expect(
+    dialog.getByRole("button", { name: "Retry move" }),
+  ).toBeVisible();
+  expect(pushed).toEqual([]);
+  const beforeRetry = await transferRecords(page);
+  expect(
+    beforeRetry.ownedCoffees.filter(
+      (record) =>
+        record.ownerId === accountOwnerId &&
+        record.id === transferFixture.coffeeId,
+    ),
+  ).toHaveLength(0);
+
+  await dialog.getByRole("button", { name: "Retry move" }).click();
+  await expect(page.getByText("Anonymous coffee")).toBeVisible();
+  const afterMove = await transferRecords(page);
+  for (const store of [
+    "ownedCoffees",
+    "ownedBeans",
+    "ownedMachines",
+    "ownedGrinders",
+    "ownedBrews",
+  ]) {
+    expect(
+      afterMove[store].filter((record) => record.ownerId === "anonymous"),
+    ).toEqual([]);
+  }
+  expect(pushed).toHaveLength(7);
+  expect(
+    pushed.find((operation) => operation.entity === "coffee")?.entityId,
+  ).toBe(transferFixture.coffeeId);
+  expect(
+    pushed.find((operation) => operation.entity === "bean")?.payload,
+  ).toMatchObject({ legacyPairedCoffee: true });
+  const entityOrder = pushed.map((operation) => operation.entity);
+  expect(entityOrder.indexOf("coffee")).toBeLessThan(
+    entityOrder.indexOf("bean"),
+  );
+  expect(entityOrder.indexOf("bean")).toBeLessThan(entityOrder.indexOf("brew"));
+});
+
+test("defers anonymous data without exposing it to the account", async ({
+  page,
+}) => {
+  const pushed: PushedOperation[] = [];
+  const dialog = await openTransferOffer(page, pushed);
+
+  await dialog.getByRole("button", { name: "Not now" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Ready for the next shot?" }),
+  ).toBeVisible();
+  await expect(page.getByText("Anonymous coffee")).toHaveCount(0);
+  const deferredRecords = await transferRecords(page);
+  expect(
+    deferredRecords.ownedCoffees.filter(
+      (record) =>
+        record.ownerId === "anonymous" &&
+        record.id === transferFixture.coffeeId,
+    ),
+  ).toHaveLength(1);
+  expect(pushed).toEqual([]);
+
+  await page.reload();
+  await expect(
+    page.getByRole("dialog", { name: /move local data/i }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Setup" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(
+    page.getByRole("button", { name: "Move local data" }),
+  ).toBeVisible();
+});
+
+test("retries anonymous transfer from Settings after a failed push", async ({
+  page,
+}) => {
+  const pushed: PushedOperation[] = [];
+  let releaseFirstPush: ((status: number) => void) | undefined;
+  let firstPush = true;
+  await mockAuthenticatedTransferRoutes(page, pushed, () => {
+    if (!firstPush) return 200;
+    firstPush = false;
+    return new Promise<number>((resolve) => {
+      releaseFirstPush = resolve;
+    });
+  });
+  await page.goto("/");
+  await putTransferRecords(page);
+  await page.reload();
+  const dialog = page.getByRole("dialog", { name: /move local data/i });
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole("button", { name: "Move data" }).click();
+  await expect(dialog.getByText(/moving local data/i)).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Not now" })).toBeDisabled();
+  await expect(
+    dialog.getByRole("button", { name: "Move data" }),
+  ).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+  releaseFirstPush?.(503);
+
+  await expect(dialog.getByRole("alert")).toContainText(
+    /local data was preserved/i,
+  );
+  const failedRecords = await transferRecords(page);
+  expect(
+    failedRecords.ownedCoffees.filter(
+      (record) =>
+        record.ownerId === "anonymous" &&
+        record.id === transferFixture.coffeeId,
+    ),
+  ).toHaveLength(1);
+  expect(
+    failedRecords.ownedCoffees.filter(
+      (record) =>
+        record.ownerId === accountOwnerId &&
+        record.id === transferFixture.coffeeId,
+    ),
+  ).toHaveLength(1);
+
+  await dialog.getByRole("button", { name: "Not now" }).click();
+  await page.getByRole("button", { name: "Setup" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
+  const recovery = page.getByRole("alert").filter({
+    hasText: "Local data move needs recovery",
+  });
+  await expect(recovery).toContainText(
+    /2 shots.*1 coffee.*1 machine.*1 grinder/i,
+  );
+  await recovery.getByRole("button", { name: "Retry local data move" }).click();
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Move data" }).click();
+  await expect(
+    page.getByText("Local data was moved to this account."),
+  ).toBeVisible();
+
+  const retriedRecords = await transferRecords(page);
+  expect(
+    retriedRecords.ownedCoffees.filter(
+      (record) =>
+        record.ownerId === accountOwnerId &&
+        record.id === transferFixture.coffeeId,
+    ),
+  ).toHaveLength(1);
+  expect(
+    retriedRecords.ownedOperations.filter(
+      (record) => record.ownerId === accountOwnerId,
+    ),
+  ).toEqual([]);
+  expect(
+    retriedRecords.ownedCoffees.filter(
+      (record) => record.ownerId === "anonymous",
+    ),
+  ).toEqual([]);
+});
+
+test("rejects transfer conflicts without writes or source deletion", async ({
+  page,
+}) => {
+  const pushed: PushedOperation[] = [];
+  await mockAuthenticatedTransferRoutes(page, pushed);
+  await page.goto("/");
+  await putTransferRecords(page, { destinationConflict: true });
+  await page.reload();
+  const dialog = page.getByRole("dialog", { name: /move local data/i });
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole("button", { name: "Move data" }).click();
+  await expect(dialog.getByRole("alert")).toContainText(
+    /conflicts with this account/i,
+  );
+  expect(pushed).toEqual([]);
+  const records = await transferRecords(page);
+  expect(
+    records.ownedCoffees.find(
+      (record) =>
+        record.ownerId === accountOwnerId &&
+        record.id === transferFixture.coffeeId,
+    ),
+  ).toMatchObject({ name: "Destination conflict coffee" });
+  expect(
+    records.ownedCoffees.find(
+      (record) =>
+        record.ownerId === "anonymous" &&
+        record.id === transferFixture.coffeeId,
+    ),
+  ).toMatchObject({ name: "Anonymous coffee" });
+});
+
+test("discovers one offline-created local transfer offer after reconnecting", async ({
+  page,
+}) => {
+  const pushed: PushedOperation[] = [];
+  await mockAuthenticatedTransferRoutes(page, pushed);
+  await page.goto("/");
+  await putTransferRecords(page, { anonymous: false });
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Ready for the next shot?" }),
+  ).toBeVisible();
+
+  await page.context().setOffline(true);
+  await putTransferRecords(page);
+  await page.context().setOffline(false);
+
+  const dialog = page.getByRole("dialog", { name: /move local data/i });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveCount(1);
+  await expect(
+    dialog.getByText(/2 shots.*1 coffee.*1 machine.*1 grinder/i),
+  ).toBeVisible();
+  expect(pushed).toEqual([]);
+});
+
+test("keeps a deferred transfer scoped to the signed-in account", async ({
+  page,
+}) => {
+  const pushed: PushedOperation[] = [];
+  const dialog = await openTransferOffer(page, pushed);
+  await dialog.getByRole("button", { name: "Not now" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Ready for the next shot?" }),
+  ).toBeVisible();
+
+  await page.unroute("**/api/v1/me");
+  await page.route("**/api/v1/me", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        user: { id: "bob", email: "bob@example.com", name: "Bob" },
+      }),
+    });
+  });
+  await page.reload();
+  await expect(
+    page.getByRole("dialog", { name: /move local data/i }),
+  ).toBeVisible();
+  expect(pushed).toEqual([]);
+});
+
 async function completeOnboarding(page: Page, roastedOn?: string) {
   await page.getByLabel("Coffee").fill("Hualalai Kona");
   await page.getByLabel("Roaster").fill("Coffee Purveyors");

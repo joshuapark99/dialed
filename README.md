@@ -33,6 +33,10 @@ pnpm dev:web
 
 The PWA is available at `http://localhost:3000` and remains fully usable without the API. Data is stored in IndexedDB.
 
+## Moving local data after sign-in
+
+Signing in does not automatically upload or expose anonymous local data to the account. Dialed offers a move only when the person chooses it. The move includes the complete Coffee, bag, equipment, and brew dependency graph, and anonymous data remains on the device until every staged sync operation has been acknowledged by the cloud.
+
 For cloud sync, start PostgreSQL, fill in the Google OAuth variables in `.env`, run migrations, and start both applications:
 
 ```bash

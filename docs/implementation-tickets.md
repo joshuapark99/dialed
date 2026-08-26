@@ -73,6 +73,14 @@ Status: Complete
 - Keep automatic comparisons scoped to the exact bag and carry Coffee/bag identity through local persistence, sync, and exports.
 - Cover onboarding, repeat-bag creation, bag-specific logging, visible history identity, and IndexedDB comparison isolation in Playwright.
 
+## DIAL-009: Consented anonymous-to-account transfer
+
+Status: Complete
+
+- Keep anonymous data device-local after sign-in unless the person explicitly accepts a move.
+- Stage the complete Coffee, bag, equipment, and brew dependency graph under the destination account, then delete the anonymous source only after cloud acknowledgement.
+- Preserve recovery state for retry, reject same-ID/different-content conflicts without writes, and cover consent, defer, retry, ordering, and isolation in browser tests.
+
 ## Later releases
 
 - Pour-over brew method and method-specific coaching.
