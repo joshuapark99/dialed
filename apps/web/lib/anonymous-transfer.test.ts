@@ -380,6 +380,70 @@ describe("anonymous transfer discovery", () => {
 });
 
 describe("anonymous transfer staging", () => {
+  it("rejects a changed source summary before conflict checks or any staging write", async () => {
+    await addValidAnonymousGraph();
+    const conflictingCoffee = {
+      ...coffee(),
+      ownerId: "account:alice",
+      name: "Conflicting destination coffee",
+    };
+    await db.coffees.add(conflictingCoffee);
+    const expectedSummary = {
+      coffees: 1,
+      bags: 1,
+      machines: 1,
+      grinders: 1,
+      brews: 1,
+      hasData: true,
+    };
+    const destinationBefore = {
+      coffees: await getCoffees("account:alice"),
+      bags: await getCoffeeBags("account:alice"),
+      machines: await getMachines("account:alice"),
+      grinders: await getGrinders("account:alice"),
+      brews: await getBrews("account:alice"),
+      operations: await getOperations("account:alice"),
+      preferences: await db.preferences.toArray(),
+    };
+
+    const error = await stageAnonymousTransfer(
+      "account:alice",
+      expectedSummary,
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      name: "AnonymousTransferSummaryChangedError",
+      currentSummary: {
+        coffees: 1,
+        bags: 1,
+        machines: 1,
+        grinders: 1,
+        brews: 2,
+        hasData: true,
+      },
+    });
+    expect(await getCoffees("account:alice")).toEqual(
+      destinationBefore.coffees,
+    );
+    expect(await getCoffeeBags("account:alice")).toEqual(
+      destinationBefore.bags,
+    );
+    expect(await getMachines("account:alice")).toEqual(
+      destinationBefore.machines,
+    );
+    expect(await getGrinders("account:alice")).toEqual(
+      destinationBefore.grinders,
+    );
+    expect(await getBrews("account:alice")).toEqual(destinationBefore.brews);
+    expect(await getOperations("account:alice")).toEqual(
+      destinationBefore.operations,
+    );
+    expect(await db.preferences.toArray()).toEqual(
+      destinationBefore.preferences,
+    );
+    expect(await getJournal("account:alice")).toBeUndefined();
+  });
+
   it("atomically stages the complete graph in dependency order and preserves unrelated destination data", async () => {
     await addValidAnonymousGraph();
     await setOwnerPreference(ANONYMOUS_OWNER_ID, "onboarded", "true");
@@ -571,6 +635,32 @@ describe("anonymous transfer staging", () => {
     expect(concurrent).toEqual(first);
     expect(retry).toEqual(first);
     expect(await getOperations("account:alice")).toHaveLength(6);
+  });
+
+  it("reuses a valid existing journal even when a retry expectation is stale", async () => {
+    await addValidAnonymousGraph();
+    const journal = await stageAnonymousTransfer("account:alice", {
+      coffees: 1,
+      bags: 1,
+      machines: 1,
+      grinders: 1,
+      brews: 2,
+      hasData: true,
+    });
+    const operations = await getOperations("account:alice");
+
+    const retry = await stageAnonymousTransfer("account:alice", {
+      coffees: 0,
+      bags: 0,
+      machines: 0,
+      grinders: 0,
+      brews: 0,
+      hasData: false,
+    });
+
+    expect(retry).toEqual(journal);
+    expect(await getOperations("account:alice")).toEqual(operations);
+    expect(await getJournal("account:alice")).toEqual(journal);
   });
 
   it("rejects anonymous as a destination and isolates an active transfer to its owner", async () => {

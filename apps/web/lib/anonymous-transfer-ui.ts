@@ -1,6 +1,7 @@
 import {
   AnonymousTransferConflictError,
   AnonymousTransferStateError,
+  AnonymousTransferSummaryChangedError,
   AnonymousTransferValidationError,
   type AnonymousTransferSummary,
 } from "./anonymous-transfer";
@@ -143,8 +144,41 @@ function productEntity(entity: string): string {
   return entity === "bean" ? "bag" : entity;
 }
 
+export function recoveryForAnonymousTransferError(
+  error: unknown,
+  attemptedSummary: AnonymousTransferSummary,
+): AnonymousTransferRecovery {
+  return {
+    summary:
+      error instanceof AnonymousTransferSummaryChangedError
+        ? error.currentSummary
+        : attemptedSummary,
+    message: anonymousTransferErrorMessage(error),
+  };
+}
+
+export async function runAnonymousTransferConsentAttempt(
+  summary: AnonymousTransferSummary,
+  move: (summary: AnonymousTransferSummary) => Promise<void>,
+): Promise<
+  { status: "moved" } | { status: "error"; recovery: AnonymousTransferRecovery }
+> {
+  try {
+    await move(summary);
+    return { status: "moved" };
+  } catch (error) {
+    return {
+      status: "error",
+      recovery: recoveryForAnonymousTransferError(error, summary),
+    };
+  }
+}
+
 export function anonymousTransferErrorMessage(error: unknown): string {
   const retry = " Local data was preserved. Select Retry move to try again.";
+  if (error instanceof AnonymousTransferSummaryChangedError) {
+    return error.message;
+  }
   if (error instanceof OwnerMutationConflictError) {
     const operation = ownerMutationLabel(error.activeKind);
     const article = error.activeKind === "delete" ? "An" : "A";

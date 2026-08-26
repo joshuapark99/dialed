@@ -8,7 +8,12 @@ export function requiresOnboarding({
 }: {
   authenticated: boolean;
   accountInitialization:
-    "syncing" | "checking-transfer" | "offering" | "ready" | "transfer-error";
+    | "syncing"
+    | "checking-transfer"
+    | "offering"
+    | "consent-changed"
+    | "ready"
+    | "transfer-error";
   onboarded: string | undefined;
   beanCount: number;
   machineCount: number;
@@ -21,9 +26,9 @@ export function requiresOnboarding({
 }
 
 export function shouldDeferAnonymousTransfer(
-  status: "offering" | "transfer-error",
+  status: "offering" | "consent-changed" | "transfer-error",
 ): boolean {
-  return status === "offering";
+  return status === "offering" || status === "consent-changed";
 }
 
 export function isRecoverableActiveTransfer(

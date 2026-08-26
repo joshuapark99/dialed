@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import {
   ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+  AnonymousTransferSummaryChangedError,
   deferAnonymousTransfer,
   getAnonymousTransferOffer,
   getAnonymousTransferSummary,
@@ -24,6 +25,7 @@ import {
   TransferDiscoveryGuard,
   anonymousTransferErrorMessage,
   reconcileAnonymousTransferRecovery,
+  recoveryForAnonymousTransferError,
   shouldPresentAnonymousTransferOffer,
   type AnonymousTransferRecovery,
 } from "@/lib/anonymous-transfer-ui";
@@ -71,6 +73,11 @@ type AccountInitialization =
   | { status: "syncing" }
   | { status: "checking-transfer" }
   | { status: "offering"; summary: AnonymousTransferSummary }
+  | {
+      status: "consent-changed";
+      summary: AnonymousTransferSummary;
+      message: string;
+    }
   | { status: "ready" }
   | {
       status: "transfer-error";
@@ -371,7 +378,7 @@ function OwnerApplication({
       updateTransferInFlight(true);
       setSyncStatus("syncing");
       try {
-        const result = await moveAnonymousDataToAccount(ownerId);
+        const result = await moveAnonymousDataToAccount(ownerId, summary);
         if (!result.completed) {
           throw new Error(
             `Local data is still syncing (${result.pendingCount} pending). Try again.`,
@@ -388,10 +395,11 @@ function OwnerApplication({
           await onAccountChanged();
           throw error;
         }
-        const message = anonymousTransferErrorMessage(error);
-        updateAnonymousTransferRecovery({ summary, message });
+        const recovery = recoveryForAnonymousTransferError(error, summary);
+        updateAnonymousTransferRecovery(recovery);
         setSyncStatus("error");
-        throw new Error(message, { cause: error });
+        if (error instanceof AnonymousTransferSummaryChangedError) throw error;
+        throw new Error(recovery.message, { cause: error });
       } finally {
         guard.finishTransfer();
         updateTransferInFlight(false);
@@ -528,6 +536,7 @@ function OwnerApplication({
     if (
       transferInFlightRef.current ||
       (accountInitialization.status !== "offering" &&
+        accountInitialization.status !== "consent-changed" &&
         accountInitialization.status !== "transfer-error")
     )
       return;
@@ -541,13 +550,14 @@ function OwnerApplication({
         error instanceof AccountMismatchError
       )
         return;
+      const recovery = recoveryForAnonymousTransferError(error, summary);
       updateAccountInitialization({
-        status: "transfer-error",
-        summary,
-        message:
-          error instanceof Error
-            ? error.message
-            : "Local data was preserved. Try the move again.",
+        status:
+          error instanceof AnonymousTransferSummaryChangedError
+            ? "consent-changed"
+            : "transfer-error",
+        summary: recovery.summary,
+        message: recovery.message,
       });
     }
   }
@@ -566,7 +576,11 @@ function OwnerApplication({
       updateAccountInitialization({ status: "ready" });
       return;
     }
-    if (accountInitialization.status !== "offering") return;
+    if (
+      accountInitialization.status !== "offering" &&
+      accountInitialization.status !== "consent-changed"
+    )
+      return;
     try {
       await deferAnonymousTransfer(ownerId);
       updateAnonymousTransferRecovery(undefined);
@@ -594,6 +608,7 @@ function OwnerApplication({
     return <Loading />;
   if (
     accountInitialization.status === "offering" ||
+    accountInitialization.status === "consent-changed" ||
     accountInitialization.status === "transfer-error"
   ) {
     return (
@@ -602,12 +617,14 @@ function OwnerApplication({
         status={
           transferInFlight
             ? "moving"
-            : accountInitialization.status === "transfer-error"
+            : accountInitialization.status === "transfer-error" ||
+                accountInitialization.status === "consent-changed"
               ? "error"
               : "offering"
         }
         error={
-          accountInitialization.status === "transfer-error"
+          accountInitialization.status === "transfer-error" ||
+          accountInitialization.status === "consent-changed"
             ? accountInitialization.message
             : undefined
         }

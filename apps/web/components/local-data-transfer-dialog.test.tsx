@@ -1,9 +1,13 @@
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import type { AnonymousTransferSummary } from "../lib/anonymous-transfer";
+import {
+  AnonymousTransferSummaryChangedError,
+  type AnonymousTransferSummary,
+} from "../lib/anonymous-transfer";
 import {
   reconcileAnonymousTransferRecovery,
+  recoveryForAnonymousTransferError,
   shouldPresentAnonymousTransferOffer,
   type AnonymousTransferRecovery,
 } from "../lib/anonymous-transfer-ui";
@@ -143,6 +147,35 @@ describe("LocalDataTransferDialog", () => {
     expect(markup).toContain("Local data was preserved. Try again.");
     expect(markup).toContain("Retry move");
     expect(markup).not.toMatch(/<button[^>]*disabled=""[^>]*>[^<]*Retry move/);
+  });
+
+  it("presents refreshed counts and requires Retry move after consent changes", () => {
+    const currentSummary = {
+      coffees: 2,
+      bags: 3,
+      machines: 0,
+      grinders: 0,
+      brews: 4,
+      hasData: true,
+    };
+    const recovery = recoveryForAnonymousTransferError(
+      new AnonymousTransferSummaryChangedError(currentSummary),
+      summary,
+    );
+    const markup = renderToStaticMarkup(
+      <LocalDataTransferDialog
+        summary={recovery.summary}
+        status="error"
+        error={recovery.message}
+        onMove={() => {}}
+        onNotNow={() => {}}
+      />,
+    );
+
+    expect(markup).toContain("4 shots, 2 coffees, and 3 bags");
+    expect(markup).not.toContain("3 shots, 1 coffee, 2 bags, and 1 machine");
+    expect(markup).toContain("Review the updated counts");
+    expect(markup).toContain("Retry move");
   });
 
   it("opens modally, closes, and restores prior focus", () => {

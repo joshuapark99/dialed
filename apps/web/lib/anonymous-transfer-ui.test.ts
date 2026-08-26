@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AnonymousTransferConflictError,
   AnonymousTransferStateError,
+  AnonymousTransferSummaryChangedError,
   AnonymousTransferValidationError,
   type AnonymousTransferSummary,
 } from "./anonymous-transfer";
@@ -16,6 +17,8 @@ import {
   TransferDiscoveryGuard,
   anonymousTransferErrorMessage,
   reconcileAnonymousTransferRecovery,
+  recoveryForAnonymousTransferError,
+  runAnonymousTransferConsentAttempt,
   shouldPresentAnonymousTransferOffer,
   type AnonymousTransferRecovery,
 } from "./anonymous-transfer-ui";
@@ -234,5 +237,62 @@ describe("anonymousTransferErrorMessage", () => {
     },
   ])("maps $error.name to actionable recovery copy", ({ error, expected }) => {
     expect(anonymousTransferErrorMessage(error)).toBe(expected);
+  });
+
+  it("maps a changed summary to new-consent copy and the current complete summary", () => {
+    const currentSummary = {
+      coffees: 2,
+      bags: 3,
+      machines: 1,
+      grinders: 1,
+      brews: 4,
+      hasData: true,
+    };
+    const error = new AnonymousTransferSummaryChangedError(currentSummary);
+
+    expect(anonymousTransferErrorMessage(error)).toBe(
+      "Local data changed before the move started. Review the updated counts, then select Retry move to confirm them. Nothing was moved.",
+    );
+    expect(recoveryForAnonymousTransferError(error, summary)).toEqual({
+      summary: currentSummary,
+      message:
+        "Local data changed before the move started. Review the updated counts, then select Retry move to confirm them. Nothing was moved.",
+    });
+  });
+
+  it("requires a second explicit consent attempt after the summary changes", async () => {
+    const currentSummary = {
+      coffees: 2,
+      bags: 3,
+      machines: 1,
+      grinders: 1,
+      brews: 4,
+      hasData: true,
+    };
+    const attemptedSummaries: AnonymousTransferSummary[] = [];
+    const move = async (attemptedSummary: AnonymousTransferSummary) => {
+      attemptedSummaries.push(attemptedSummary);
+      if (attemptedSummaries.length === 1) {
+        throw new AnonymousTransferSummaryChangedError(currentSummary);
+      }
+    };
+
+    const first = await runAnonymousTransferConsentAttempt(summary, move);
+
+    expect(first).toEqual({
+      status: "error",
+      recovery: {
+        summary: currentSummary,
+        message:
+          "Local data changed before the move started. Review the updated counts, then select Retry move to confirm them. Nothing was moved.",
+      },
+    });
+    expect(attemptedSummaries).toEqual([summary]);
+    if (first.status !== "error") throw new Error("Expected updated consent");
+
+    await expect(
+      runAnonymousTransferConsentAttempt(first.recovery.summary, move),
+    ).resolves.toEqual({ status: "moved" });
+    expect(attemptedSummaries).toEqual([summary, currentSummary]);
   });
 });

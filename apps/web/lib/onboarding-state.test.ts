@@ -6,7 +6,12 @@ import {
 } from "./onboarding-state";
 
 describe("onboarding readiness", () => {
-  it.each(["syncing", "checking-transfer", "offering"] as const)(
+  it.each([
+    "syncing",
+    "checking-transfer",
+    "offering",
+    "consent-changed",
+  ] as const)(
     "waits for authenticated account initialization while %s",
     (accountInitialization) => {
       expect(
@@ -61,8 +66,9 @@ describe("onboarding readiness", () => {
     ).toBe(true);
   });
 
-  it("defers an untouched offer but never a failed move with a possible active journal", () => {
+  it("defers pre-stage consent states but never a failed move with a possible active journal", () => {
     expect(shouldDeferAnonymousTransfer("offering")).toBe(true);
+    expect(shouldDeferAnonymousTransfer("consent-changed")).toBe(true);
     expect(shouldDeferAnonymousTransfer("transfer-error")).toBe(false);
   });
 

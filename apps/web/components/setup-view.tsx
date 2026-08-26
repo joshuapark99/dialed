@@ -17,7 +17,10 @@ import {
   UserRound,
 } from "lucide-react";
 import type { AnonymousTransferSummary } from "@/lib/anonymous-transfer";
-import type { AnonymousTransferRecovery } from "@/lib/anonymous-transfer-ui";
+import {
+  runAnonymousTransferConsentAttempt,
+  type AnonymousTransferRecovery,
+} from "@/lib/anonymous-transfer-ui";
 import {
   discardAnonymousData,
   makeId,
@@ -103,19 +106,19 @@ export function SetupView({
     setTransferDialogStatus("moving");
     setTransferError(undefined);
     setTransferSucceeded(false);
-    try {
-      await onMoveAnonymousData(transferDialogSummary);
+    const result = await runAnonymousTransferConsentAttempt(
+      transferDialogSummary,
+      onMoveAnonymousData,
+    );
+    if (result.status === "moved") {
       setTransferDialogStatus(undefined);
       setTransferDialogSummary(undefined);
       setTransferSucceeded(true);
-    } catch (error) {
-      setTransferError(
-        error instanceof Error
-          ? error.message
-          : "Local data was preserved. Try the move again.",
-      );
-      setTransferDialogStatus("error");
+      return;
     }
+    setTransferDialogSummary(result.recovery.summary);
+    setTransferError(result.recovery.message);
+    setTransferDialogStatus("error");
   }
 
   function download(format: "json" | "csv") {

@@ -79,6 +79,15 @@ export class AnonymousTransferValidationError extends Error {
   }
 }
 
+export class AnonymousTransferSummaryChangedError extends Error {
+  constructor(public readonly currentSummary: AnonymousTransferSummary) {
+    super(
+      "Local data changed before the move started. Review the updated counts, then select Retry move to confirm them. Nothing was moved.",
+    );
+    this.name = "AnonymousTransferSummaryChangedError";
+  }
+}
+
 function cloneAndFreeze<T>(value: T): Readonly<T> {
   if (Array.isArray(value)) {
     return Object.freeze(
@@ -370,6 +379,7 @@ function operationFor(
 
 export async function stageAnonymousTransfer(
   destinationOwnerId: string,
+  expectedSummary?: AnonymousTransferSummary,
 ): Promise<AnonymousTransferJournal> {
   if (destinationOwnerId === ANONYMOUS_OWNER_ID) {
     throw new Error("Anonymous data cannot be transferred to anonymous");
@@ -398,6 +408,13 @@ export async function stageAnonymousTransfer(
       }
 
       const snapshot = await validateAnonymousTransferGraph();
+      const currentSummary = anonymousTransferSnapshotSummary(snapshot);
+      if (
+        expectedSummary &&
+        !sameAnonymousTransferSummary(expectedSummary, currentSummary)
+      ) {
+        throw new AnonymousTransferSummaryChangedError(currentSummary);
+      }
       const [coffees, bags, machines, grinders, brews] = await Promise.all([
         db.coffees.bulkGet(
           snapshot.coffees.map(({ id }) => [destinationOwnerId, id]),
@@ -509,6 +526,42 @@ export async function stageAnonymousTransfer(
 
       return journal;
     },
+  );
+}
+
+function anonymousTransferSnapshotSummary(
+  snapshot: AnonymousTransferSnapshot,
+): AnonymousTransferSummary {
+  const summary = {
+    coffees: snapshot.coffees.length,
+    bags: snapshot.bags.length,
+    machines: snapshot.machines.length,
+    grinders: snapshot.grinders.length,
+    brews: snapshot.brews.length,
+  };
+  return {
+    ...summary,
+    hasData:
+      summary.coffees +
+        summary.bags +
+        summary.machines +
+        summary.grinders +
+        summary.brews >
+      0,
+  };
+}
+
+function sameAnonymousTransferSummary(
+  expected: AnonymousTransferSummary,
+  current: AnonymousTransferSummary,
+): boolean {
+  return (
+    expected.coffees === current.coffees &&
+    expected.bags === current.bags &&
+    expected.machines === current.machines &&
+    expected.grinders === current.grinders &&
+    expected.brews === current.brews &&
+    expected.hasData === current.hasData
   );
 }
 

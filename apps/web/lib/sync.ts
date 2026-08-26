@@ -21,6 +21,7 @@ import {
 import {
   completeAnonymousTransfer,
   stageAnonymousTransfer,
+  type AnonymousTransferSummary,
   type AnonymousTransferJournal,
 } from "./anonymous-transfer";
 import {
@@ -920,13 +921,14 @@ export function synchronize(ownerId: string): Promise<void> {
 
 export function moveAnonymousDataToAccount(
   ownerId: string,
+  expectedSummary?: AnonymousTransferSummary,
 ): Promise<{ completed: boolean; pendingCount: number }> {
   if (ownerId === ANONYMOUS_OWNER_ID) {
     return Promise.reject(new Error("Transfer destination must be an account"));
   }
   return syncCoordinator.transferAnonymous(
     ownerId,
-    () => stageAnonymousTransfer(ownerId),
+    () => stageAnonymousTransfer(ownerId, expectedSummary),
     () => completeAnonymousTransfer(ownerId),
   );
 }

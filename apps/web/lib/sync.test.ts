@@ -33,8 +33,10 @@ import type {
 } from "./db";
 import type { Brew, Coffee, CoffeeBag, Owned, SyncOperation } from "./models";
 import {
+  AnonymousTransferSummaryChangedError,
   completeAnonymousTransfer,
   stageAnonymousTransfer,
+  type AnonymousTransferSummary,
   type AnonymousTransferJournal,
 } from "./anonymous-transfer";
 import {
@@ -2389,6 +2391,75 @@ describe("owner-aware synchronization", () => {
     await expect(
       moveAnonymousDataToAccount(ANONYMOUS_OWNER_ID),
     ).rejects.toThrow("Transfer destination must be an account");
+  });
+
+  it("propagates the consented summary through the production move entry point", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const { coffee, bag } = coffeeAndBag();
+      await saveCoffeeWithBag(ANONYMOUS_OWNER_ID, coffee, bag);
+      const request = vi.fn(
+        async <T>(
+          _name: string,
+          _options: { mode: "exclusive" },
+          callback: () => Promise<T>,
+        ) => callback(),
+      );
+      vi.stubGlobal("navigator", { onLine: true, locks: { request } });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: string | URL | Request) => {
+          const url = String(input);
+          if (url === "/api/v1/me") {
+            return response(200, { user: aliceAccount });
+          }
+          if (url.startsWith("/api/v1/sync/pull")) {
+            return response(200, {
+              operations: [],
+              cursor: 0,
+              hasMore: false,
+            });
+          }
+          throw new Error(`Unexpected transfer request: ${url}`);
+        }),
+      );
+      const expectedSummary = {
+        coffees: 0,
+        bags: 0,
+        machines: 0,
+        grinders: 0,
+        brews: 0,
+        hasData: false,
+      } satisfies AnonymousTransferSummary;
+
+      const error = await moveAnonymousDataToAccount(
+        alice,
+        expectedSummary,
+      ).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(AnonymousTransferSummaryChangedError);
+      expect(error).toMatchObject({
+        currentSummary: {
+          coffees: 1,
+          bags: 1,
+          machines: 0,
+          grinders: 0,
+          brews: 0,
+          hasData: true,
+        },
+      });
+      expect(await getCoffees(alice)).toEqual([]);
+      expect(await getStoredOperations(alice)).toEqual([]);
+      expect(
+        await getOwnerPreference(alice, ANONYMOUS_TRANSFER_JOURNAL_KEY),
+      ).toBeUndefined();
+      expect(request).toHaveBeenCalledOnce();
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
   });
 
   it("drains a tombstone that replaces the snapshotted upsert during sync", async () => {
