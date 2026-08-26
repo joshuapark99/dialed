@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
   Coffee,
@@ -13,6 +13,16 @@ import {
   WifiOff,
 } from "lucide-react";
 import {
+  ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+  AnonymousTransferConflictError,
+  AnonymousTransferStateError,
+  AnonymousTransferValidationError,
+  deferAnonymousTransfer,
+  getAnonymousTransferOffer,
+  getAnonymousTransferSummary,
+  type AnonymousTransferSummary,
+} from "@/lib/anonymous-transfer";
+import {
   ANONYMOUS_OWNER_ID,
   db,
   getBrews,
@@ -24,12 +34,19 @@ import {
   setOwnerPreference,
 } from "@/lib/db";
 import type { AccountUser, Brew } from "@/lib/models";
-import { requiresOnboarding } from "@/lib/onboarding-state";
+import {
+  isRecoverableActiveTransfer,
+  requiresOnboarding,
+  shouldDeferAnonymousTransfer,
+  shouldSynchronizePendingOperations,
+} from "@/lib/onboarding-state";
 import {
   AccountMismatchError,
   AuthenticationExpiredError,
+  CrossContextOwnerLockUnavailableError,
   getCurrentUser,
   isCloudIdentityStorageEvent,
+  moveAnonymousDataToAccount,
   ownerIdForAccount,
   OwnerCacheRebuildError,
   resetAndSynchronize,
@@ -40,11 +57,25 @@ import { BrewLog } from "./brew-log";
 import { BrewResult } from "./brew-result";
 import { HistoryView } from "./history-view";
 import { HomeView } from "./home-view";
+import { LocalDataTransferDialog } from "./local-data-transfer-dialog";
 import { Onboarding } from "./onboarding";
 import { SetupView, type OwnerCacheResetResult } from "./setup-view";
 import { Brand } from "./ui";
 
 type View = "home" | "log" | "history" | "setup" | "result";
+
+type AccountInitialization =
+  | { status: "syncing" }
+  | { status: "checking-transfer" }
+  | { status: "offering"; summary: AnonymousTransferSummary }
+  | { status: "ready" }
+  | {
+      status: "transfer-error";
+      summary: AnonymousTransferSummary;
+      message: string;
+    };
+
+type SyncAttempt = "success" | "unavailable" | "identity-changed";
 
 const navItems = [
   { value: "home" as const, label: "Home", icon: Home },
@@ -138,11 +169,31 @@ function OwnerApplication({
     }),
     [ownerId],
   );
+  const anonymousTransferSummary = useLiveQuery(
+    () => getAnonymousTransferSummary(),
+    [],
+  );
   const [view, setView] = useState<View>("home");
   const [result, setResult] = useState<Brew>();
   const [online, setOnline] = useState(true);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("local");
   const [resettingOwner, setResettingOwner] = useState(false);
+  const [accountInitialization, setAccountInitialization] =
+    useState<AccountInitialization>(
+      account ? { status: "syncing" } : { status: "ready" },
+    );
+  const [movingInitialTransfer, setMovingInitialTransfer] = useState(false);
+  const accountInitializationRef = useRef(accountInitialization);
+  const initializationStartedRef = useRef(false);
+  const previousPendingCountRef = useRef<number | undefined>(undefined);
+
+  const updateAccountInitialization = useCallback(
+    (next: AccountInitialization) => {
+      accountInitializationRef.current = next;
+      setAccountInitialization(next);
+    },
+    [],
+  );
   const loaded =
     setupState !== undefined &&
     coffees !== undefined &&
@@ -152,20 +203,20 @@ function OwnerApplication({
     brews !== undefined &&
     pendingCount !== undefined;
 
-  const runSync = useCallback(async () => {
+  const runSync = useCallback(async (): Promise<SyncAttempt> => {
     if (!account) {
       setSyncStatus("local");
-      return false;
+      return "unavailable";
     }
     if (!navigator.onLine) {
       setSyncStatus("offline");
-      return false;
+      return "unavailable";
     }
     setSyncStatus("syncing");
     try {
       await synchronize(ownerId);
       setSyncStatus("synced");
-      return true;
+      return "success";
     } catch (error) {
       if (
         error instanceof AuthenticationExpiredError ||
@@ -173,10 +224,69 @@ function OwnerApplication({
       ) {
         setSyncStatus("local");
         await onAccountChanged();
-        return false;
+        return "identity-changed";
       }
       setSyncStatus("error");
-      return false;
+      return "unavailable";
+    }
+  }, [account, onAccountChanged, ownerId]);
+
+  const discoverTransferOffer = useCallback(async () => {
+    updateAccountInitialization({ status: "checking-transfer" });
+    try {
+      let summary = await getAnonymousTransferOffer(ownerId);
+      if (!summary) {
+        const activeDestinationOwnerId = await getOwnerPreference(
+          ANONYMOUS_OWNER_ID,
+          ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+        );
+        if (isRecoverableActiveTransfer(activeDestinationOwnerId, ownerId)) {
+          const activeSummary = await getAnonymousTransferSummary();
+          if (activeSummary.hasData) summary = activeSummary;
+        }
+      }
+      updateAccountInitialization(
+        summary ? { status: "offering", summary } : { status: "ready" },
+      );
+    } catch {
+      setSyncStatus("error");
+      updateAccountInitialization({ status: "ready" });
+    }
+  }, [ownerId, updateAccountInitialization]);
+
+  const syncAndDiscoverTransfer = useCallback(async () => {
+    const result = await runSync();
+    if (result === "success") await discoverTransferOffer();
+    return result;
+  }, [discoverTransferOffer, runSync]);
+
+  const syncFromUi = useCallback(
+    async () => (await syncAndDiscoverTransfer()) === "success",
+    [syncAndDiscoverTransfer],
+  );
+
+  const moveAnonymousData = useCallback(async () => {
+    if (!account) throw new Error("Transfer destination must be an account");
+    setSyncStatus("syncing");
+    try {
+      const result = await moveAnonymousDataToAccount(ownerId);
+      if (!result.completed) {
+        throw new Error(
+          `Local data is still syncing (${result.pendingCount} pending). Try again.`,
+        );
+      }
+      setSyncStatus("synced");
+    } catch (error) {
+      if (
+        error instanceof AuthenticationExpiredError ||
+        error instanceof AccountMismatchError
+      ) {
+        setSyncStatus("local");
+        await onAccountChanged();
+        throw error;
+      }
+      setSyncStatus("error");
+      throw new Error(anonymousTransferErrorMessage(error), { cause: error });
     }
   }, [account, onAccountChanged, ownerId]);
 
@@ -222,31 +332,161 @@ function OwnerApplication({
   }, [account, onAccountChanged, ownerId]);
 
   useEffect(() => {
+    if (!loaded || !account || initializationStartedRef.current) return;
+    initializationStartedRef.current = true;
+    void (async () => {
+      const result = await runSync();
+      if (result === "success") {
+        await discoverTransferOffer();
+      } else if (result === "unavailable") {
+        updateAccountInitialization({ status: "ready" });
+      }
+    })();
+  }, [
+    account,
+    discoverTransferOffer,
+    loaded,
+    runSync,
+    updateAccountInitialization,
+  ]);
+
+  useEffect(() => {
     setOnline(navigator.onLine);
-    const update = () => setOnline(navigator.onLine);
+    const update = () => {
+      const nextOnline = navigator.onLine;
+      setOnline(nextOnline);
+      if (
+        nextOnline &&
+        account &&
+        accountInitializationRef.current.status === "ready"
+      ) {
+        void syncAndDiscoverTransfer();
+      }
+    };
     window.addEventListener("online", update);
     window.addEventListener("offline", update);
     return () => {
       window.removeEventListener("online", update);
       window.removeEventListener("offline", update);
     };
-  }, []);
+  }, [account, syncAndDiscoverTransfer]);
 
   useEffect(() => {
     if (!account) return;
-    const onFocus = () => void runSync();
+    const onFocus = () => {
+      if (accountInitializationRef.current.status === "ready") {
+        void syncAndDiscoverTransfer();
+      }
+    };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [account, runSync]);
+  }, [account, syncAndDiscoverTransfer]);
 
   useEffect(() => {
-    if (account && online) void runSync();
-  }, [account, online, pendingCount, runSync]);
+    if (pendingCount === undefined) return;
+    const previousPendingCount = previousPendingCountRef.current;
+    previousPendingCountRef.current = pendingCount;
+    if (
+      shouldSynchronizePendingOperations({
+        authenticated: Boolean(account),
+        accountInitialization: accountInitializationRef.current.status,
+        online,
+        previousPendingCount,
+        pendingCount,
+      })
+    ) {
+      void syncAndDiscoverTransfer();
+    }
+  }, [account, online, pendingCount, syncAndDiscoverTransfer]);
+
+  async function startInitialTransfer() {
+    if (
+      movingInitialTransfer ||
+      (accountInitialization.status !== "offering" &&
+        accountInitialization.status !== "transfer-error")
+    )
+      return;
+    const summary = accountInitialization.summary;
+    setMovingInitialTransfer(true);
+    try {
+      await moveAnonymousData();
+      updateAccountInitialization({ status: "ready" });
+    } catch (error) {
+      if (
+        error instanceof AuthenticationExpiredError ||
+        error instanceof AccountMismatchError
+      )
+        return;
+      updateAccountInitialization({
+        status: "transfer-error",
+        summary,
+        message:
+          error instanceof Error
+            ? error.message
+            : "Local data was preserved. Try the move again.",
+      });
+    } finally {
+      setMovingInitialTransfer(false);
+    }
+  }
+
+  async function dismissInitialTransfer() {
+    if (movingInitialTransfer) return;
+    if (
+      accountInitialization.status === "transfer-error" &&
+      !shouldDeferAnonymousTransfer(accountInitialization.status)
+    ) {
+      updateAccountInitialization({ status: "ready" });
+      return;
+    }
+    if (accountInitialization.status !== "offering") return;
+    try {
+      await deferAnonymousTransfer(ownerId);
+      updateAccountInitialization({ status: "ready" });
+    } catch (error) {
+      updateAccountInitialization({
+        status: "transfer-error",
+        summary: accountInitialization.summary,
+        message: anonymousTransferErrorMessage(error),
+      });
+    }
+  }
 
   if (!loaded || resettingOwner) return <Loading />;
   if (
+    account &&
+    (accountInitialization.status === "syncing" ||
+      accountInitialization.status === "checking-transfer")
+  )
+    return <Loading />;
+  if (
+    accountInitialization.status === "offering" ||
+    accountInitialization.status === "transfer-error"
+  ) {
+    return (
+      <LocalDataTransferDialog
+        summary={accountInitialization.summary}
+        status={
+          movingInitialTransfer
+            ? "moving"
+            : accountInitialization.status === "transfer-error"
+              ? "error"
+              : "offering"
+        }
+        error={
+          accountInitialization.status === "transfer-error"
+            ? accountInitialization.message
+            : undefined
+        }
+        onMove={() => void startInitialTransfer()}
+        onNotNow={() => void dismissInitialTransfer()}
+      />
+    );
+  }
+  if (
     requiresOnboarding({
       authenticated: Boolean(account),
+      accountInitialization: accountInitialization.status,
       onboarded: setupState?.onboarded,
       beanCount: setupState?.profileCount ?? 0,
       machineCount: machines.length,
@@ -320,9 +560,11 @@ function OwnerApplication({
           pendingCount={pendingCount}
           account={account}
           syncStatus={syncStatus}
-          onSync={runSync}
+          onSync={syncFromUi}
           onResetOwnerCache={resetOwnerCache}
           onAccountChanged={onAccountChanged}
+          anonymousTransferSummary={anonymousTransferSummary}
+          onMoveAnonymousData={moveAnonymousData}
         />
       );
     return (
@@ -519,4 +761,21 @@ function compactStatusLabel(
   if (syncStatus === "error") return "Sync error";
   if (syncStatus === "local") return "Not synced";
   return pendingCount ? `${pendingCount} pending` : "Synced";
+}
+
+function anonymousTransferErrorMessage(error: unknown): string {
+  const retry = " Local data was preserved. Select Retry move to try again.";
+  if (
+    error instanceof AnonymousTransferStateError ||
+    error instanceof CrossContextOwnerLockUnavailableError
+  ) {
+    return `${error.message}${retry}`;
+  }
+  if (error instanceof AnonymousTransferConflictError) {
+    return `Local ${error.entity} data conflicts with this account.${retry}`;
+  }
+  if (error instanceof AnonymousTransferValidationError) {
+    return `Local ${error.entity} data is incomplete and could not be moved.${retry}`;
+  }
+  return `Dialed could not move local data. Check the connection and try again.${retry}`;
 }

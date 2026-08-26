@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import {
+  ArrowRightLeft,
   Cloud,
   Coffee,
   Database,
@@ -15,6 +16,7 @@ import {
   Trash2,
   UserRound,
 } from "lucide-react";
+import type { AnonymousTransferSummary } from "@/lib/anonymous-transfer";
 import {
   discardAnonymousData,
   makeId,
@@ -38,6 +40,7 @@ import {
   type SyncStatus,
 } from "@/lib/sync";
 import { CoffeeLibrary } from "./coffee-library";
+import { LocalDataTransferDialog } from "./local-data-transfer-dialog";
 import { PageHeading } from "./ui";
 
 type SetupTab = "coffee" | "equipment" | "settings";
@@ -59,6 +62,8 @@ export function SetupView({
   onSync,
   onResetOwnerCache,
   onAccountChanged,
+  anonymousTransferSummary,
+  onMoveAnonymousData,
 }: {
   ownerId: string;
   coffees: CoffeeModel[];
@@ -72,10 +77,36 @@ export function SetupView({
   onSync: () => Promise<boolean>;
   onResetOwnerCache: () => Promise<OwnerCacheResetResult | undefined>;
   onAccountChanged: () => Promise<void>;
+  anonymousTransferSummary: AnonymousTransferSummary | undefined;
+  onMoveAnonymousData: () => Promise<void>;
 }) {
   const [tab, setTab] = useState<SetupTab>("coffee");
   const [adding, setAdding] = useState<"machine" | "grinder">();
   const [resetting, setResetting] = useState(false);
+  const [transferDialogStatus, setTransferDialogStatus] = useState<
+    "offering" | "moving" | "error"
+  >();
+  const [transferError, setTransferError] = useState<string>();
+  const [transferSucceeded, setTransferSucceeded] = useState(false);
+
+  async function moveAnonymousData() {
+    if (transferDialogStatus === "moving") return;
+    setTransferDialogStatus("moving");
+    setTransferError(undefined);
+    setTransferSucceeded(false);
+    try {
+      await onMoveAnonymousData();
+      setTransferDialogStatus(undefined);
+      setTransferSucceeded(true);
+    } catch (error) {
+      setTransferError(
+        error instanceof Error
+          ? error.message
+          : "Local data was preserved. Try the move again.",
+      );
+      setTransferDialogStatus("error");
+    }
+  }
 
   function download(format: "json" | "csv") {
     const data =
@@ -307,6 +338,25 @@ export function SetupView({
               <Database className="h-5 w-5 text-muted" />
               <span className="flex-1 font-semibold">Export brew CSV</span>
             </button>
+            {account && anonymousTransferSummary?.hasData && (
+              <button
+                type="button"
+                className="flex min-h-14 w-full items-center gap-3 border-b border-line px-4 text-left hover:bg-canvas"
+                onClick={() => {
+                  setTransferError(undefined);
+                  setTransferSucceeded(false);
+                  setTransferDialogStatus("offering");
+                }}
+              >
+                <ArrowRightLeft className="h-5 w-5 text-muted" />
+                <span className="flex-1">
+                  <span className="block font-semibold">Move local data</span>
+                  <span className="block text-xs text-muted">
+                    Move local-mode coffee and brews into this account
+                  </span>
+                </span>
+              </button>
+            )}
             <button
               type="button"
               className="flex min-h-14 w-full items-center gap-3 px-4 text-left text-coral hover:bg-coral/5"
@@ -329,6 +379,22 @@ export function SetupView({
                 </span>
               </span>
             </button>
+            {transferError && !transferDialogStatus && (
+              <p
+                role="alert"
+                className="border-t border-line p-4 text-sm text-coral"
+              >
+                {transferError} Select Move local data to retry.
+              </p>
+            )}
+            {transferSucceeded && (
+              <p
+                role="status"
+                className="border-t border-line p-4 text-sm text-leaf"
+              >
+                Local data was moved to this account.
+              </p>
+            )}
           </section>
           {account && (
             <button
@@ -351,6 +417,15 @@ export function SetupView({
           ownerId={ownerId}
           kind={adding}
           onClose={() => setAdding(undefined)}
+        />
+      )}
+      {transferDialogStatus && anonymousTransferSummary?.hasData && (
+        <LocalDataTransferDialog
+          summary={anonymousTransferSummary}
+          status={transferDialogStatus}
+          error={transferError}
+          onMove={() => void moveAnonymousData()}
+          onNotNow={() => setTransferDialogStatus(undefined)}
         />
       )}
     </div>
