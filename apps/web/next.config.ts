@@ -1,8 +1,13 @@
 import type { NextConfig } from "next";
 import { fileURLToPath } from "node:url";
+import { shouldPollForFileChanges } from "./lib/dev-file-watching";
 
 const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
 const apiOrigin = process.env.API_INTERNAL_URL ?? "http://127.0.0.1:3001";
+const pollForFileChanges = shouldPollForFileChanges(
+  process.platform,
+  workspaceRoot,
+);
 
 const nextConfig: NextConfig = {
   allowedDevOrigins: ["127.0.0.1"],
@@ -14,6 +19,16 @@ const nextConfig: NextConfig = {
   experimental: {
     optimizePackageImports: ["lucide-react"],
     webpackBuildWorker: false,
+  },
+  webpack(config, { dev }) {
+    if (dev && pollForFileChanges) {
+      config.watchOptions = {
+        ...config.watchOptions,
+        poll: 1_000,
+        aggregateTimeout: 200,
+      };
+    }
+    return config;
   },
   async rewrites() {
     return [
