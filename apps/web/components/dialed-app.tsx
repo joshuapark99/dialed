@@ -115,6 +115,10 @@ export function DialedApp() {
       setAccountState({ status: "error" });
     }
   }, []);
+  const continueWithLocalData = useCallback(async () => {
+    localStorage.removeItem("dialed-cloud-enabled");
+    await refreshAccount();
+  }, [refreshAccount]);
   const isOwnerCurrent = useCallback(
     (ownerId: string) => activeOwnerIdRef.current === ownerId,
     [],
@@ -136,7 +140,12 @@ export function DialedApp() {
   if (accountState.status === "loading") {
     content = <Loading />;
   } else if (accountState.status === "error") {
-    content = <AccountLookupError onRetry={refreshAccount} />;
+    content = (
+      <AccountLookupError
+        onRetry={refreshAccount}
+        onContinue={continueWithLocalData}
+      />
+    );
   } else {
     const { account } = accountState;
     const ownerId = account
@@ -863,7 +872,13 @@ function Loading() {
   );
 }
 
-function AccountLookupError({ onRetry }: { onRetry: () => Promise<void> }) {
+function AccountLookupError({
+  onRetry,
+  onContinue,
+}: {
+  onRetry: () => Promise<void>;
+  onContinue: () => Promise<void>;
+}) {
   return (
     <main className="flex min-h-dvh items-center justify-center px-5">
       <section role="alert" className="max-w-md text-center">
@@ -873,14 +888,27 @@ function AccountLookupError({ onRetry }: { onRetry: () => Promise<void> }) {
           Dialed could not confirm which account owns this device's data. Try
           again before continuing.
         </p>
-        <button
-          type="button"
-          className="button-primary mx-auto mt-5"
-          onClick={() => void onRetry()}
-        >
-          <RefreshCw className="h-4 w-4" />
-          Retry
-        </button>
+        <p className="mt-2 text-sm leading-relaxed text-muted">
+          You can also continue with local data. Account data will stay hidden
+          on this device.
+        </p>
+        <div className="mt-5 flex flex-col items-center gap-3">
+          <button
+            type="button"
+            className="button-primary"
+            onClick={() => void onRetry()}
+          >
+            <RefreshCw className="h-4 w-4" />
+            Retry
+          </button>
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={() => void onContinue()}
+          >
+            Continue with local data
+          </button>
+        </div>
       </section>
     </main>
   );

@@ -1079,6 +1079,49 @@ test("blocks local partitions when account lookup fails and allows retry", async
   await expect(page.getByLabel("Coffee")).toBeVisible();
 });
 
+test("allows explicit local mode when account lookup remains unavailable", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await completeOnboarding(page);
+  await putTransferRecords(page, { anonymous: false });
+  const accountRecordsBefore = Object.fromEntries(
+    Object.entries(await transferRecords(page)).map(([store, records]) => [
+      store,
+      records.filter((record) => record.ownerId === accountOwnerId),
+    ]),
+  );
+  await page.route("**/api/v1/me", async (route) => {
+    await route.fulfill({ status: 503 });
+  });
+  await page.evaluate(() => {
+    localStorage.setItem("dialed-cloud-enabled", "true");
+  });
+
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Account unavailable" }),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Continue with local data" }).click();
+
+  await page.getByRole("button", { name: "Setup" }).click();
+  await expect(page.getByText("Hualalai Kona")).toBeVisible();
+  await expect(page.getByText("Account coffee")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() => localStorage.getItem("dialed-cloud-enabled")),
+    )
+    .toBeNull();
+  const accountRecordsAfter = Object.fromEntries(
+    Object.entries(await transferRecords(page)).map(([store, records]) => [
+      store,
+      records.filter((record) => record.ownerId === accountOwnerId),
+    ]),
+  );
+  expect(accountRecordsAfter).toEqual(accountRecordsBefore);
+});
+
 test("shows sync errors instead of a synced account label", async ({
   page,
 }) => {
