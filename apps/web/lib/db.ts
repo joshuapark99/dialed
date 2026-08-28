@@ -676,6 +676,47 @@ function deletionOperation(
   };
 }
 
+async function journalOwnedOperationIds(
+  ownerId: string,
+): Promise<ReadonlySet<string>> {
+  const [journalPreference, sourceDestinationOwnerId] = await Promise.all([
+    db.preferences.get(
+      ownerPreferenceKey(ownerId, ANONYMOUS_TRANSFER_JOURNAL_KEY),
+    ),
+    db.preferences.get(
+      ownerPreferenceKey(
+        ANONYMOUS_OWNER_ID,
+        ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+      ),
+    ),
+  ]);
+  if (!journalPreference) {
+    if (sourceDestinationOwnerId?.value === ownerId) {
+      throw new AnonymousTransferStateError();
+    }
+    return new Set();
+  }
+  const journal = parseBoundAnonymousTransferJournal(
+    journalPreference.value,
+    ownerId,
+    sourceDestinationOwnerId?.value,
+  );
+  return new Set(journal.operationIds);
+}
+
+async function removeNonJournalOperations(
+  ownerId: string,
+  operationIds: readonly string[],
+): Promise<void> {
+  if (!operationIds.length) return;
+  const protectedOperationIds = await journalOwnedOperationIds(ownerId);
+  await db.operations.bulkDelete(
+    operationIds
+      .filter((operationId) => !protectedOperationIds.has(operationId))
+      .map((operationId) => ownerKey(ownerId, operationId)),
+  );
+}
+
 export async function saveCoffeeWithBag(
   ownerId: string,
   coffee: Coffee,
@@ -792,11 +833,7 @@ export async function deleteBrew(
           (pending) => pending.entity === "brew" && pending.entityId === id,
         )
         .map((pending) => pending.operationId);
-      await db.operations.bulkDelete(
-        supersededOperationIds.map((operationId) =>
-          ownerKey(ownerId, operationId),
-        ),
-      );
+      await removeNonJournalOperations(ownerId, supersededOperationIds);
       await db.brews.delete(key);
       await db.operations.add(deletionOperation(ownerId, "brew", id));
       return true;
@@ -841,9 +878,7 @@ export async function removeOperations(
     )
       .filter(({ operationId }) => operationIds.includes(operationId))
       .map(({ operationId }) => operationId);
-    await db.operations.bulkDelete(
-      ownedIds.map((operationId) => ownerKey(ownerId, operationId)),
-    );
+    await removeNonJournalOperations(ownerId, ownedIds);
   });
 }
 

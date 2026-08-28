@@ -10,6 +10,7 @@ import {
   clearDeletedAccountData,
   clearOwnerData,
   db,
+  deleteBrew,
   DeletedOwnerWriteError,
   finishOwnerMutationFence,
   getBrews,
@@ -24,6 +25,8 @@ import {
   OwnerMutationFenceLostError,
   saveBrew,
   saveCoffeeWithBag,
+  saveGrinder,
+  saveMachine,
   verifyOwnerMutationFence,
 } from "./db";
 import type {
@@ -343,6 +346,60 @@ describe("owner-aware synchronization", () => {
     expect(resetOwner).not.toHaveBeenCalled();
     expect(deleteCloud).not.toHaveBeenCalled();
     expect(clearLocal).not.toHaveBeenCalled();
+  });
+
+  it("handles a queued transfer snapshot rejection immediately and still propagates it", async () => {
+    let markSyncStarted!: () => void;
+    let releaseSync!: () => void;
+    const syncStarted = new Promise<void>((resolve) => {
+      markSyncStarted = resolve;
+    });
+    const syncBlocked = new Promise<void>((resolve) => {
+      releaseSync = resolve;
+    });
+    const snapshotFailure = new Error("owner mutation snapshot failed");
+    const rejectedSnapshot = Promise.reject(snapshotFailure);
+    const originalThen = rejectedSnapshot.then.bind(rejectedSnapshot);
+    let rejectionHandlerAttached = false;
+    rejectedSnapshot.then = ((
+      onFulfilled?: (value: never) => unknown,
+      onRejected?: (reason: unknown) => unknown,
+    ) => {
+      if (onRejected) rejectionHandlerAttached = true;
+      return originalThen(onFulfilled, onRejected);
+    }) as typeof rejectedSnapshot.then;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "/api/v1/me") {
+        markSyncStarted();
+        await syncBlocked;
+        return response(200, { user: aliceAccount });
+      }
+      return response(200, { operations: [], cursor: 0, hasMore: false });
+    });
+    const coordinator = createSyncCoordinator(
+      dependencies({
+        fetch,
+        getOwnerMutationState: () => rejectedSnapshot,
+      }),
+      fakeOwnerLock(),
+    );
+    const synchronization = coordinator.synchronize(alice);
+    await syncStarted;
+
+    const transfer = coordinator.transferAnonymous(
+      alice,
+      async () => transferJournal(),
+      async () => ({ completed: true, pendingCount: 0 }),
+    );
+    const handledBeforeLockAcquisition = rejectionHandlerAttached;
+    void rejectedSnapshot.catch(() => undefined);
+    releaseSync();
+    await synchronization;
+    const transferError = await transfer.catch((error: unknown) => error);
+
+    expect(handledBeforeLockAcquisition).toBe(true);
+    expect(transferError).toBe(snapshotFailure);
   });
 
   it("publishes a durable transfer fence before the initial destination drain", async () => {
@@ -1588,6 +1645,240 @@ describe("owner-aware synchronization", () => {
       expect(
         fetch.mock.calls.filter(([input]) => String(input) === "/api/v1/me"),
       ).toHaveLength(1);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("completes a persisted fully acknowledged journal while offline without staging again", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const { coffee, bag } = coffeeAndBag();
+      await saveCoffeeWithBag(ANONYMOUS_OWNER_ID, coffee, bag);
+      const journal = await stageAnonymousTransfer(alice);
+      await acknowledgeStoredOperations(alice, journal.operationIds);
+      db.close();
+      await db.open();
+
+      const fetch = vi.fn(async () => {
+        throw new Error(
+          "network must not be required for acknowledged cleanup",
+        );
+      });
+      const stage = vi.fn(() => stageAnonymousTransfer(alice));
+      const coordinator = createSyncCoordinator(
+        storedDependencies(fetch, { isOnline: () => false }),
+        fakeOwnerLock(),
+      );
+
+      await expect(
+        coordinator.transferAnonymous(alice, stage, () =>
+          completeAnonymousTransfer(alice),
+        ),
+      ).resolves.toEqual({ completed: true, pendingCount: 0 });
+
+      expect(stage).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+      expect(await getCoffees(ANONYMOUS_OWNER_ID)).toEqual([]);
+      expect(await getCoffees(alice)).toHaveLength(1);
+      expect(await getCoffeeBags(alice)).toHaveLength(1);
+      expect(await getStoredOperations(alice)).toEqual([]);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("resumes a persisted staged journal before failing unrelated pending work", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const { coffee, bag } = coffeeAndBag();
+      await saveCoffeeWithBag(ANONYMOUS_OWNER_ID, coffee, bag);
+      const journal = await stageAnonymousTransfer(alice);
+      const unrelatedOperationId = "0198d3a4-1111-7000-8000-000000000225";
+      await db.operations.add({
+        ownerId: alice,
+        operationId: unrelatedOperationId,
+        entity: "machine",
+        entityId: unrelatedOperationId,
+        action: "delete",
+        createdAt: "2020-01-01T00:00:00.000Z",
+      });
+      db.close();
+      await db.open();
+
+      const pushedBatches: string[][] = [];
+      const fetch = vi.fn(
+        async (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          if (url === "/api/v1/me") {
+            return response(200, { user: aliceAccount });
+          }
+          if (url === "/api/v1/sync/push") {
+            const body = JSON.parse(String(init?.body)) as {
+              operations: Array<{ operationId: string }>;
+            };
+            const pushedIds = body.operations.map(
+              ({ operationId: pushedId }) => pushedId,
+            );
+            pushedBatches.push(pushedIds);
+            return pushedIds.includes(unrelatedOperationId)
+              ? response(503, { error: "unrelated operation failed" })
+              : response(200, { results: [] });
+          }
+          return response(200, {
+            operations: [],
+            cursor: 0,
+            hasMore: false,
+          });
+        },
+      );
+      const stage = vi.fn(() => stageAnonymousTransfer(alice));
+      const coordinator = createSyncCoordinator(
+        storedDependencies(fetch),
+        fakeOwnerLock(),
+      );
+
+      await expect(
+        coordinator.transferAnonymous(alice, stage, () =>
+          completeAnonymousTransfer(alice),
+        ),
+      ).resolves.toEqual({ completed: true, pendingCount: 0 });
+
+      expect(stage).not.toHaveBeenCalled();
+      expect(pushedBatches).toEqual([journal.operationIds]);
+      expect(new Set(pushedBatches.flat()).size).toBe(
+        journal.operationIds.length,
+      );
+      expect(
+        (await getStoredOperations(alice)).map(
+          ({ operationId: pendingId }) => pendingId,
+        ),
+      ).toEqual([unrelatedOperationId]);
+      expect(await getCoffees(ANONYMOUS_OWNER_ID)).toEqual([]);
+      expect(await getCoffees(alice)).toHaveLength(1);
+      expect(await getCoffeeBags(alice)).toHaveLength(1);
+    } finally {
+      db.close();
+      await Dexie.delete("dialed-local");
+    }
+  });
+
+  it("completes without duplicate operations after a cross-context staged brew deletion", async () => {
+    db.close();
+    await Dexie.delete("dialed-local");
+    await db.open();
+    try {
+      const { coffee, bag } = coffeeAndBag(
+        "0198d3a4-1111-7000-8000-000000000226",
+        beanId,
+      );
+      await saveCoffeeWithBag(ANONYMOUS_OWNER_ID, coffee, bag);
+      await saveMachine(ANONYMOUS_OWNER_ID, {
+        id: "0198d3a4-1111-7000-8000-000000000213",
+        name: "Linea Mini",
+        temperatureControl: "precise",
+        hasPressureControl: false,
+        hasPreinfusion: true,
+        createdAt,
+      });
+      await saveGrinder(ANONYMOUS_OWNER_ID, {
+        id: "0198d3a4-1111-7000-8000-000000000214",
+        name: "P64",
+        finerDirection: "lower",
+        createdAt,
+      });
+      await saveBrew(ANONYMOUS_OWNER_ID, brewPayload(36));
+
+      let markStaged!: () => void;
+      let releaseStage!: () => void;
+      const staged = new Promise<void>((resolve) => {
+        markStaged = resolve;
+      });
+      const stageBlocked = new Promise<void>((resolve) => {
+        releaseStage = resolve;
+      });
+      const pushedBatches: string[][] = [];
+      const fetch = vi.fn(
+        async (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          if (url === "/api/v1/me") {
+            return response(200, { user: aliceAccount });
+          }
+          if (url === "/api/v1/sync/push") {
+            const body = JSON.parse(String(init?.body)) as {
+              operations: Array<{ operationId: string }>;
+            };
+            pushedBatches.push(
+              body.operations.map(({ operationId: pushedId }) => pushedId),
+            );
+            return response(200, { results: [] });
+          }
+          return response(200, {
+            operations: [],
+            cursor: 0,
+            hasMore: false,
+          });
+        },
+      );
+      const coordinator = createSyncCoordinator(
+        storedDependencies(fetch),
+        fakeOwnerLock(),
+      );
+      let journal!: AnonymousTransferJournal;
+      const transfer = coordinator.transferAnonymous(
+        alice,
+        async () => {
+          journal = await stageAnonymousTransfer(alice);
+          markStaged();
+          await stageBlocked;
+          return journal;
+        },
+        () => completeAnonymousTransfer(alice),
+      );
+      await staged;
+
+      expect(await deleteBrew(alice, brewId)).toBe(true);
+      const afterDeletionOperationIds = (await getStoredOperations(alice)).map(
+        ({ operationId: pendingId }) => pendingId,
+      );
+      releaseStage();
+
+      await expect(transfer).resolves.toEqual({
+        completed: true,
+        pendingCount: 0,
+      });
+      expect(afterDeletionOperationIds).toHaveLength(
+        journal.operationIds.length + 1,
+      );
+      expect(afterDeletionOperationIds).toEqual(
+        expect.arrayContaining(journal.operationIds),
+      );
+      expect(
+        afterDeletionOperationIds.filter(
+          (pendingId) => !journal.operationIds.includes(pendingId),
+        ),
+      ).toHaveLength(1);
+      expect(pushedBatches).toEqual([journal.operationIds]);
+      expect(new Set(pushedBatches.flat()).size).toBe(
+        journal.operationIds.length,
+      );
+      expect(await getBrews(alice)).toEqual([]);
+      expect(await getCoffees(alice)).toHaveLength(1);
+      expect(await getCoffeeBags(alice)).toHaveLength(1);
+      expect(await getCoffees(ANONYMOUS_OWNER_ID)).toEqual([]);
+      expect(await getStoredOperations(alice)).toEqual([
+        expect.objectContaining({
+          entity: "brew",
+          entityId: brewId,
+          action: "delete",
+        }),
+      ]);
     } finally {
       db.close();
       await Dexie.delete("dialed-local");

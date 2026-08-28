@@ -302,6 +302,8 @@ test("moves anonymous data only after refreshed consent", async ({ page }) => {
     dialog.getByText(/2 shots.*1 coffee.*1 machine.*1 grinder/i),
   ).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Move data" })).toBeFocused();
+  const originalDialogElement = await dialog.elementHandle();
+  expect(originalDialogElement).not.toBeNull();
 
   await page.evaluate(
     async ({ secondBrewId, addedBrewId }) => {
@@ -342,6 +344,14 @@ test("moves anonymous data only after refreshed consent", async ({ page }) => {
   await expect(
     dialog.getByRole("button", { name: "Retry move" }),
   ).toBeVisible();
+  const refreshedDialogElement = await dialog.elementHandle();
+  expect(refreshedDialogElement).not.toBeNull();
+  expect(
+    await originalDialogElement!.evaluate(
+      (original, refreshed) => original === refreshed,
+      refreshedDialogElement!,
+    ),
+  ).toBe(true);
   expect(pushed).toEqual([]);
   const beforeRetry = await transferRecords(page);
   expectNoAccountFixtureCopies(beforeRetry);

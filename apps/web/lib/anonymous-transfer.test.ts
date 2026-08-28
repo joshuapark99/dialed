@@ -767,6 +767,53 @@ describe("anonymous transfer acknowledgement and cleanup", () => {
     expect(await getJournal("account:alice")).toEqual(journal);
   });
 
+  it("preserves persisted journal operations across generic removal and still completes cleanup", async () => {
+    await addValidAnonymousGraph();
+    const journal = await stageAnonymousTransfer("account:alice");
+    const unrelatedOperationId = "0198d3a4-1111-7000-8000-000000000041";
+    await db.operations.add({
+      ownerId: "account:alice",
+      operationId: unrelatedOperationId,
+      entity: "machine",
+      entityId: unrelatedOperationId,
+      action: "delete",
+      createdAt: new Date(Date.parse(journal.startedAt) + 100).toISOString(),
+    });
+    db.close();
+    await db.open();
+
+    await removeOperations("account:alice", [
+      ...journal.operationIds,
+      unrelatedOperationId,
+    ]);
+    db.close();
+    await db.open();
+
+    expect(
+      (await getOperations("account:alice")).map(
+        ({ operationId }) => operationId,
+      ),
+    ).toEqual(journal.operationIds);
+    expect(await getJournal("account:alice")).toEqual(journal);
+
+    await acknowledgeOperations("account:alice", journal.operationIds);
+    await expect(completeAnonymousTransfer("account:alice")).resolves.toEqual({
+      completed: true,
+      pendingCount: 0,
+    });
+
+    expect(await getOperations("account:alice")).toEqual([]);
+    expect(await getJournal("account:alice")).toBeUndefined();
+    expect(await getAnonymousTransferSummary()).toMatchObject({
+      hasData: false,
+    });
+    expect(await getCoffees("account:alice")).toHaveLength(1);
+    expect(await getCoffeeBags("account:alice")).toHaveLength(1);
+    expect(await getMachines("account:alice")).toHaveLength(1);
+    expect(await getGrinders("account:alice")).toHaveLength(1);
+    expect(await getBrews("account:alice")).toHaveLength(2);
+  });
+
   it("cleans only anonymous data and transfer markers after every operation is acknowledged", async () => {
     await addValidAnonymousGraph();
     await setOwnerPreference(ANONYMOUS_OWNER_ID, "onboarded", "true");

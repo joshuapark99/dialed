@@ -498,19 +498,8 @@ async function readStoredTransferJournal(
   expected: AnonymousTransferJournal,
   dependencies: SyncDependencies,
 ): Promise<AnonymousTransferJournal> {
-  const [storedValue, sourceDestinationOwnerId] = await Promise.all([
-    dependencies.getPreference(ownerId, ANONYMOUS_TRANSFER_JOURNAL_KEY),
-    dependencies.getPreference(
-      ANONYMOUS_OWNER_ID,
-      ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
-    ),
-  ]);
-  if (storedValue === undefined) throw new AnonymousTransferStateError();
-  const stored = parseBoundAnonymousTransferJournal(
-    storedValue,
-    ownerId,
-    sourceDestinationOwnerId,
-  );
+  const stored = await readOptionalStoredTransferJournal(ownerId, dependencies);
+  if (stored === undefined) throw new AnonymousTransferStateError();
   if (
     stored.startedAt !== expected.startedAt ||
     !sameOperationIds(stored.operationIds, expected.operationIds)
@@ -518,6 +507,30 @@ async function readStoredTransferJournal(
     throw new AnonymousTransferStateError();
   }
   return stored;
+}
+
+async function readOptionalStoredTransferJournal(
+  ownerId: string,
+  dependencies: SyncDependencies,
+): Promise<AnonymousTransferJournal | undefined> {
+  const [storedValue, sourceDestinationOwnerId] = await Promise.all([
+    dependencies.getPreference(ownerId, ANONYMOUS_TRANSFER_JOURNAL_KEY),
+    dependencies.getPreference(
+      ANONYMOUS_OWNER_ID,
+      ANONYMOUS_TRANSFER_SOURCE_MARKER_KEY,
+    ),
+  ]);
+  if (storedValue === undefined) {
+    if (sourceDestinationOwnerId !== undefined) {
+      throw new AnonymousTransferStateError();
+    }
+    return undefined;
+  }
+  return parseBoundAnonymousTransferJournal(
+    storedValue,
+    ownerId,
+    sourceDestinationOwnerId,
+  );
 }
 
 async function drainTransferSynchronization(
@@ -768,6 +781,7 @@ export function createSyncCoordinator(
       );
     }
     const requestedMutationState = dependencies.getOwnerMutationState(ownerId);
+    void requestedMutationState.catch(() => undefined);
     let request!: Promise<{ completed: boolean; pendingCount: number }>;
     request = ownerLock
       .runExclusive(ownerId, async () => {
@@ -783,9 +797,15 @@ export function createSyncCoordinator(
         try {
           await assertOwnerNotDeleted(ownerId, dependencies);
           await dependencies.verifyOwnerMutationFence(ownerId, mutation);
-          await drainOwnerSynchronization(ownerId, dependencies, () => false);
-          await dependencies.verifyOwnerMutationFence(ownerId, mutation);
-          const journal = await stage();
+          let journal = await readOptionalStoredTransferJournal(
+            ownerId,
+            dependencies,
+          );
+          if (journal === undefined) {
+            await drainOwnerSynchronization(ownerId, dependencies, () => false);
+            await dependencies.verifyOwnerMutationFence(ownerId, mutation);
+            journal = await stage();
+          }
           await drainTransferSynchronization(ownerId, journal, dependencies);
           await dependencies.verifyOwnerMutationFence(ownerId, mutation);
           return await complete();
