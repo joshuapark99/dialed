@@ -11,6 +11,15 @@ const transferFixture = {
   secondBrewId: "0198f06e-1620-7000-8000-000000000306",
   createdAt: "2026-08-22T12:00:00.000Z",
 };
+const addedBrewId = "0198f06e-1620-7000-8000-000000000307";
+const transferFixtureEntities = [
+  { store: "ownedCoffees", id: transferFixture.coffeeId },
+  { store: "ownedBeans", id: transferFixture.bagId },
+  { store: "ownedMachines", id: transferFixture.machineId },
+  { store: "ownedGrinders", id: transferFixture.grinderId },
+  { store: "ownedBrews", id: transferFixture.firstBrewId },
+  { store: "ownedBrews", id: transferFixture.secondBrewId },
+] as const;
 
 type PushedOperation = {
   operationId: string;
@@ -18,6 +27,34 @@ type PushedOperation = {
   entityId: string;
   payload?: Record<string, unknown>;
 };
+
+type TransferRecords = Record<string, Array<Record<string, unknown>>>;
+
+function accountFixtureCopies(records: TransferRecords) {
+  return transferFixtureEntities.map(({ store, id }) => ({
+    store,
+    id,
+    records: records[store].filter(
+      (record) => record.ownerId === accountOwnerId && record.id === id,
+    ),
+  }));
+}
+
+function expectNoAccountFixtureCopies(
+  records: TransferRecords,
+  exceptIds: readonly string[] = [],
+) {
+  for (const copy of accountFixtureCopies(records)) {
+    if (exceptIds.includes(copy.id)) continue;
+    expect(copy.records).toEqual([]);
+  }
+}
+
+function expectOneAccountCopyPerFixtureEntity(records: TransferRecords) {
+  for (const copy of accountFixtureCopies(records)) {
+    expect(copy.records).toHaveLength(1);
+  }
+}
 
 async function putTransferRecords(
   page: Page,
@@ -209,6 +246,7 @@ async function mockAuthenticatedTransferRoutes(
   page: Page,
   pushed: PushedOperation[],
   pushStatus: () => number | Promise<number> = () => 200,
+  pushedBatches?: PushedOperation[][],
 ) {
   await page.addInitScript(() => {
     localStorage.setItem("dialed-cloud-enabled", "true");
@@ -234,6 +272,7 @@ async function mockAuthenticatedTransferRoutes(
       operations: PushedOperation[];
     };
     pushed.push(...body.operations);
+    pushedBatches?.push(body.operations);
     const status = await pushStatus();
     await route.fulfill({
       status,
@@ -264,34 +303,37 @@ test("moves anonymous data only after refreshed consent", async ({ page }) => {
   ).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Move data" })).toBeFocused();
 
-  await page.evaluate(async ({ secondBrewId }) => {
-    const database = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open("dialed-local");
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => resolve(request.result);
-    });
-    const transaction = database.transaction("ownedBrews", "readwrite");
-    const store = transaction.objectStore("ownedBrews");
-    const source = await new Promise<Record<string, unknown>>(
-      (resolve, reject) => {
-        const request = store.get(["anonymous", secondBrewId]);
+  await page.evaluate(
+    async ({ secondBrewId, addedBrewId }) => {
+      const database = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open("dialed-local");
         request.onerror = () => reject(request.error);
-        request.onsuccess = () =>
-          resolve(request.result as Record<string, unknown>);
-      },
-    );
-    store.put({
-      ...source,
-      id: "0198f06e-1620-7000-8000-000000000307",
-      grind: "1.0",
-    });
-    await new Promise<void>((resolve, reject) => {
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
-      transaction.onabort = () => reject(transaction.error);
-    });
-    database.close();
-  }, transferFixture);
+        request.onsuccess = () => resolve(request.result);
+      });
+      const transaction = database.transaction("ownedBrews", "readwrite");
+      const store = transaction.objectStore("ownedBrews");
+      const source = await new Promise<Record<string, unknown>>(
+        (resolve, reject) => {
+          const request = store.get(["anonymous", secondBrewId]);
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () =>
+            resolve(request.result as Record<string, unknown>);
+        },
+      );
+      store.put({
+        ...source,
+        id: addedBrewId,
+        grind: "1.0",
+      });
+      await new Promise<void>((resolve, reject) => {
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
+      database.close();
+    },
+    { ...transferFixture, addedBrewId },
+  );
 
   await dialog.getByRole("button", { name: "Move data" }).click();
   await expect(dialog).toHaveCount(1);
@@ -302,13 +344,7 @@ test("moves anonymous data only after refreshed consent", async ({ page }) => {
   ).toBeVisible();
   expect(pushed).toEqual([]);
   const beforeRetry = await transferRecords(page);
-  expect(
-    beforeRetry.ownedCoffees.filter(
-      (record) =>
-        record.ownerId === accountOwnerId &&
-        record.id === transferFixture.coffeeId,
-    ),
-  ).toHaveLength(0);
+  expectNoAccountFixtureCopies(beforeRetry);
 
   await dialog.getByRole("button", { name: "Retry move" }).click();
   await expect(dialog).toBeHidden();
@@ -327,7 +363,7 @@ test("moves anonymous data only after refreshed consent", async ({ page }) => {
       afterMove[store].filter((record) => record.ownerId === "anonymous"),
     ).toEqual([]);
   }
-  expect(pushed).toHaveLength(7);
+  expect(pushed).toHaveLength(transferFixtureEntities.length + 1);
   expect(
     pushed.find((operation) => operation.entity === "coffee")?.entityId,
   ).toBe(transferFixture.coffeeId);
@@ -377,20 +413,26 @@ test("retries anonymous transfer from Settings after a failed push", async ({
   page,
 }) => {
   const pushed: PushedOperation[] = [];
+  const pushedBatches: PushedOperation[][] = [];
   let releaseFirstPush: ((status: number) => void) | undefined;
   let startedFirstPush: (() => void) | undefined;
   const firstPushStarted = new Promise<void>((resolve) => {
     startedFirstPush = resolve;
   });
   let firstPush = true;
-  await mockAuthenticatedTransferRoutes(page, pushed, () => {
-    if (!firstPush) return 200;
-    firstPush = false;
-    startedFirstPush?.();
-    return new Promise<number>((resolve) => {
-      releaseFirstPush = resolve;
-    });
-  });
+  await mockAuthenticatedTransferRoutes(
+    page,
+    pushed,
+    () => {
+      if (!firstPush) return 200;
+      firstPush = false;
+      startedFirstPush?.();
+      return new Promise<number>((resolve) => {
+        releaseFirstPush = resolve;
+      });
+    },
+    pushedBatches,
+  );
   await page.goto("/");
   await putTransferRecords(page);
   await page.reload();
@@ -444,13 +486,11 @@ test("retries anonymous transfer from Settings after a failed push", async ({
   ).toBeVisible();
 
   const retriedRecords = await transferRecords(page);
-  expect(
-    retriedRecords.ownedCoffees.filter(
-      (record) =>
-        record.ownerId === accountOwnerId &&
-        record.id === transferFixture.coffeeId,
-    ),
-  ).toHaveLength(1);
+  expectOneAccountCopyPerFixtureEntity(retriedRecords);
+  expect(pushedBatches).toHaveLength(2);
+  expect(pushedBatches[1]!.map((operation) => operation.operationId)).toEqual(
+    pushedBatches[0]!.map((operation) => operation.operationId),
+  );
   expect(
     retriedRecords.ownedOperations.filter(
       (record) => record.ownerId === accountOwnerId,
@@ -487,6 +527,7 @@ test("rejects transfer conflicts without writes or source deletion", async ({
         record.id === transferFixture.coffeeId,
     ),
   ).toMatchObject({ name: "Destination conflict coffee" });
+  expectNoAccountFixtureCopies(records, [transferFixture.coffeeId]);
   expect(
     records.ownedCoffees.find(
       (record) =>
