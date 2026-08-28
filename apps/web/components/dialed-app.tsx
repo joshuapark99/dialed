@@ -398,8 +398,7 @@ function OwnerApplication({
         const recovery = recoveryForAnonymousTransferError(error, summary);
         updateAnonymousTransferRecovery(recovery);
         setSyncStatus("error");
-        if (error instanceof AnonymousTransferSummaryChangedError) throw error;
-        throw new Error(recovery.message, { cause: error });
+        throw error;
       } finally {
         guard.finishTransfer();
         updateTransferInFlight(false);

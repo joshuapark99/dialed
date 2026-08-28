@@ -311,7 +311,10 @@ test("moves anonymous data only after refreshed consent", async ({ page }) => {
   ).toHaveLength(0);
 
   await dialog.getByRole("button", { name: "Retry move" }).click();
-  await expect(page.getByText("Anonymous coffee")).toBeVisible();
+  await expect(dialog).toBeHidden();
+  await expect(
+    page.getByRole("heading", { name: "Ready for the next shot?" }),
+  ).toBeVisible();
   const afterMove = await transferRecords(page);
   for (const store of [
     "ownedCoffees",
@@ -375,10 +378,15 @@ test("retries anonymous transfer from Settings after a failed push", async ({
 }) => {
   const pushed: PushedOperation[] = [];
   let releaseFirstPush: ((status: number) => void) | undefined;
+  let startedFirstPush: (() => void) | undefined;
+  const firstPushStarted = new Promise<void>((resolve) => {
+    startedFirstPush = resolve;
+  });
   let firstPush = true;
   await mockAuthenticatedTransferRoutes(page, pushed, () => {
     if (!firstPush) return 200;
     firstPush = false;
+    startedFirstPush?.();
     return new Promise<number>((resolve) => {
       releaseFirstPush = resolve;
     });
@@ -391,6 +399,7 @@ test("retries anonymous transfer from Settings after a failed push", async ({
 
   await dialog.getByRole("button", { name: "Move data" }).click();
   await expect(dialog.getByText(/moving local data/i)).toBeVisible();
+  await firstPushStarted;
   await expect(dialog.getByRole("button", { name: "Not now" })).toBeDisabled();
   await expect(
     dialog.getByRole("button", { name: "Move data" }),
