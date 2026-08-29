@@ -1,0 +1,77 @@
+#!/bin/sh
+set -eu
+
+die() {
+  printf 'dialed-poc: %s\n' "$*" >&2
+  exit 1
+}
+
+require_absolute_path() {
+  path_name=$1
+  path_value=$2
+  case "$path_value" in
+    /*) ;;
+    *) die "$path_name must be an absolute path" ;;
+  esac
+}
+
+require_value() {
+  value_name=$1
+  value_value=$2
+  [ -n "$value_value" ] || die "$value_name is required"
+}
+
+validate_owned_file() {
+  file_path=$1
+  require_absolute_path "file" "$file_path"
+  [ -f "$file_path" ] || die "$file_path must be a regular file"
+  [ ! -L "$file_path" ] || die "$file_path must not be a symbolic link"
+  [ "$(stat -c '%u' "$file_path")" = "$(id -u)" ] ||
+    die "$file_path must be owned by the current user"
+  [ -z "$(find "$file_path" -prune -perm /022 -print)" ] ||
+    die "$file_path must not be group- or world-writable"
+}
+
+validate_secret_file() {
+  file_path=$1
+  validate_owned_file "$file_path"
+  [ -z "$(find "$file_path" -prune -perm /077 -print)" ] ||
+    die "$file_path must be readable only by its owner"
+}
+
+load_poc_env() {
+  DIALED_ENV_FILE=${DIALED_ENV_FILE:-/etc/dialed/poc.env}
+  require_absolute_path "DIALED_ENV_FILE" "$DIALED_ENV_FILE"
+  validate_secret_file "$DIALED_ENV_FILE"
+  set -a
+  # shellcheck disable=SC1090 -- validated, root-owned runtime configuration.
+  . "$DIALED_ENV_FILE"
+  set +a
+}
+
+load_active_state() {
+  DIALED_ACTIVE_STATE=${DIALED_ACTIVE_STATE:-/var/lib/dialed/active.env}
+  require_absolute_path "DIALED_ACTIVE_STATE" "$DIALED_ACTIVE_STATE"
+  validate_secret_file "$DIALED_ACTIVE_STATE"
+  set -a
+  # shellcheck disable=SC1090 -- validated, root-owned deployment state.
+  . "$DIALED_ACTIVE_STATE"
+  set +a
+}
+
+acquire_lock() {
+  if [ "${DIALED_LOCK_HELD:-0}" = "1" ]; then
+    return
+  fi
+  DIALED_LOCK_FILE=${DIALED_LOCK_FILE:-/run/lock/dialed-poc.lock}
+  require_absolute_path "DIALED_LOCK_FILE" "$DIALED_LOCK_FILE"
+  exec 9>"$DIALED_LOCK_FILE"
+  flock -n 9 || exit 0
+}
+
+compose() {
+  DIALED_COMPOSE_FILE=${DIALED_COMPOSE_FILE:-/opt/dialed/compose.poc.yaml}
+  require_absolute_path "DIALED_COMPOSE_FILE" "$DIALED_COMPOSE_FILE"
+  validate_owned_file "$DIALED_COMPOSE_FILE"
+  docker compose --env-file "$DIALED_ENV_FILE" -f "$DIALED_COMPOSE_FILE" "$@"
+}
