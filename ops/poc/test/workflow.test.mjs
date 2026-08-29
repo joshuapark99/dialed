@@ -54,6 +54,20 @@ test("workflow runs for one ref cannot race publication and smoke checks", () =>
   assert.match(settings, /cancel-in-progress:\s*false/);
 });
 
+test("container gate builds both architectures and exercises runtime health", () => {
+  const containers = job("containers");
+  assert.match(containers, /docker\/setup-qemu-action@/);
+  assert.match(containers, /docker\/setup-buildx-action@/);
+  assert.ok(
+    (containers.match(/--platform linux\/amd64,linux\/arm64/g) ?? []).length >=
+      2,
+  );
+  assert.match(containers, /--output type=cacheonly/);
+  assert.match(containers, /--name dialed-api-ci/);
+  assert.match(containers, /--name dialed-web-ci/);
+  assert.match(containers, /\.State\.Health\.Status/);
+});
+
 test("every GitHub action is pinned to an immutable commit", () => {
   const actions = [...workflow.matchAll(/^\s+(?:-\s+)?uses:\s+(\S+)/gm)].map(
     ([, action]) => action,

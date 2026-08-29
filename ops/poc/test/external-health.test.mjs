@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   validateExternalHealthConfig,
+  verifyAccessProtection,
   waitForExternalRevision,
 } from "../lib/external-health.mjs";
 
@@ -60,6 +61,43 @@ test("external verification configuration requires HTTPS, a Git revision, and cr
       }),
     /credentials/,
   );
+});
+
+test("unauthenticated origin health is rejected as missing Access protection", async () => {
+  const requests = [];
+  await assert.rejects(
+    verifyAccessProtection({
+      baseUrl: "https://poc.example.com",
+      fetchImpl: async (input, init) => {
+        requests.push({ input: new URL(input), init });
+        return healthResponse("/healthz");
+      },
+    }),
+    /publicly reachable|Access protection/i,
+  );
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].input.pathname, "/healthz");
+  assert.equal(requests[0].init.redirect, "manual");
+  assert.equal(requests[0].init.headers, undefined);
+});
+
+test("unauthenticated Access denial or login redirect proves protection", async () => {
+  await verifyAccessProtection({
+    baseUrl: "https://poc.example.com",
+    fetchImpl: async () => new Response("forbidden", { status: 403 }),
+  });
+  await verifyAccessProtection({
+    baseUrl: "https://poc.example.com",
+    fetchImpl: async () =>
+      new Response(null, {
+        status: 302,
+        headers: {
+          location:
+            "https://dialed.cloudflareaccess.com/cdn-cgi/access/login/poc.example.com",
+        },
+      }),
+  });
 });
 
 test("both public health requests carry Cloudflare Access credentials", async () => {

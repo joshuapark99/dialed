@@ -87,6 +87,52 @@ function describeProbe(result) {
   return `${result.label}=${result.httpStatus}${state}${revision}`;
 }
 
+export async function verifyAccessProtection({
+  baseUrl,
+  fetchImpl = fetch,
+  requestTimeoutMs = 10_000,
+}) {
+  const origin = new URL(baseUrl);
+  if (origin.protocol !== "https:") {
+    throw new Error("Access protection verification requires HTTPS");
+  }
+
+  const response = await fetchImpl(new URL("/healthz", origin), {
+    redirect: "manual",
+    signal: AbortSignal.timeout(requestTimeoutMs),
+  });
+  if (response.status === 401 || response.status === 403) return;
+
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get("location");
+    if (location) {
+      const login = new URL(location, origin);
+      if (
+        login.protocol === "https:" &&
+        login.hostname.endsWith(".cloudflareaccess.com") &&
+        login.pathname.startsWith("/cdn-cgi/access/")
+      ) {
+        return;
+      }
+    }
+  }
+
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    body = undefined;
+  }
+  if (response.ok && body?.status === "ok") {
+    throw new Error(
+      "POC origin health is publicly reachable without Cloudflare Access protection",
+    );
+  }
+  throw new Error(
+    `Could not prove Cloudflare Access protection; unauthenticated /healthz returned HTTP ${response.status}`,
+  );
+}
+
 export async function waitForExternalRevision({
   baseUrl,
   revision,

@@ -25,6 +25,31 @@ require_compose_version() {
   fi
 }
 
+require_dedicated_storage_path() {
+  storage_name=$1
+  storage_path=$2
+  relative_path=${storage_path#/}
+  case "$relative_path" in
+    */*) ;;
+    *) die "$storage_name must be a dedicated nested path, not $storage_path" ;;
+  esac
+}
+
+ensure_root_directory() {
+  directory_name=$1
+  directory_path=$2
+  if [ -e "$directory_path" ]; then
+    [ -d "$directory_path" ] || die "$directory_path must be a directory"
+    [ ! -L "$directory_path" ] || die "$directory_path must not be a symbolic link"
+    [ "$(stat -c '%u' "$directory_path")" = "0" ] ||
+      die "$directory_path must be owned by root"
+    [ -z "$(find "$directory_path" -prune -perm /077 -print)" ] ||
+      die "$directory_name must be mode 0700"
+  else
+    install -d -o root -g root -m 0700 "$directory_path"
+  fi
+}
+
 [ "$(id -u)" = "0" ] || die "run this installer as root"
 case "$(uname -m)" in
   aarch64 | arm64) ;;
@@ -78,13 +103,21 @@ require_absolute_path "DIALED_BACKUP_DIR" "$DIALED_BACKUP_DIR"
 data_path=$(realpath -m -- "$DIALED_DATA_DIR")
 postgres_path=$data_path/postgres
 backup_path=$(realpath -m -- "$DIALED_BACKUP_DIR")
+require_dedicated_storage_path "DIALED_DATA_DIR" "$data_path"
+require_dedicated_storage_path "DIALED_BACKUP_DIR" "$backup_path"
 case "$backup_path" in
-  "$postgres_path" | "$postgres_path"/*)
-    die "DIALED_BACKUP_DIR must be outside $postgres_path"
+  "$data_path" | "$data_path"/*)
+    die "DIALED_DATA_DIR and DIALED_BACKUP_DIR must be separate dedicated directories"
+    ;;
+esac
+case "$data_path" in
+  "$backup_path" | "$backup_path"/*)
+    die "DIALED_DATA_DIR and DIALED_BACKUP_DIR must be separate dedicated directories"
     ;;
 esac
 
-install -d -o root -g root -m 0700 "$data_path" "$backup_path"
+ensure_root_directory "DIALED_DATA_DIR" "$data_path"
+ensure_root_directory "DIALED_BACKUP_DIR" "$backup_path"
 if [ -e "$postgres_path" ]; then
   [ -d "$postgres_path" ] || die "$postgres_path must be a directory"
   [ ! -L "$postgres_path" ] || die "$postgres_path must not be a symbolic link"

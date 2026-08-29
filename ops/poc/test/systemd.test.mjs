@@ -108,3 +108,15 @@ test("installer preserves operator secrets and validates before enabling timers"
     /poc\.env\.example["'\\\s]+\/etc\/dialed\/poc\.env(?:["'\\\s]|$)/,
   );
 });
+
+test("installer validates dedicated storage without chmodding existing paths", () => {
+  const source = readInstaller();
+  assert.match(source, /require_dedicated_storage_path/);
+  assert.match(source, /ensure_root_directory/);
+  assert.match(source, /must be a dedicated nested path/);
+  assert.match(source, /must be separate dedicated directories/);
+  assert.doesNotMatch(
+    source,
+    /install -d -o root -g root -m 0700 "\$data_path" "\$backup_path"/,
+  );
+});

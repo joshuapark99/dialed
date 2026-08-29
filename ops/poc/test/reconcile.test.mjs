@@ -113,6 +113,10 @@ case "$command_line" in
     if [ "$FAKE_MODE" = "migration-fail" ]; then exit 25; fi
     exit 0
     ;;
+  *"up --no-deps -d api web"*)
+    if [ "$FAKE_MODE" = "candidate-start-fail" ] && [ "$WEB_IMAGE" = "$FAKE_WEB_IMAGE" ]; then exit 28; fi
+    exit 0
+    ;;
   *"up --no-deps -d cloudflared"*)
     if [ "$FAKE_MODE" = "tunnel-fail" ]; then exit 27; fi
     exit 0
@@ -147,8 +151,8 @@ exit 99
   };
 }
 
-function runReconcile(value, overrides = {}) {
-  return spawnSync("sh", [reconcilePath], {
+function runReconcile(value, overrides = {}, arguments_ = []) {
+  return spawnSync("sh", [reconcilePath, ...arguments_], {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -196,6 +200,23 @@ test("unchanged exact digests exit without backup, migration, or restart", (t) =
   assert.doesNotMatch(dockerLog(value), /pg_dump|run --rm|compose up/);
 });
 
+test("force reconciles unchanged exact digests without migration", (t) => {
+  const value = fixture(t);
+  writeFileSync(
+    value.activeState,
+    stateText(webCandidate, apiCandidate, candidateRevision),
+    { mode: 0o600 },
+  );
+
+  const result = runReconcile(value, {}, ["force"]);
+  assert.equal(result.status, 0, result.stderr);
+  const log = dockerLog(value);
+  assert.match(log, /up --no-deps -d postgres/);
+  assert.match(log, /up --no-deps -d api web/);
+  assert.match(log, /up --no-deps -d cloudflared/);
+  assert.doesNotMatch(log, /pg_dump|run --rm --no-deps migrate/);
+});
+
 test("mismatched OCI revisions fail before backup", (t) => {
   const value = fixture(t);
   const result = runReconcile(value, {
@@ -227,6 +248,27 @@ test("migration failure leaves active state unchanged", (t) => {
   assert.equal(readFileSync(value.activeState, "utf8"), before);
   assert.match(dockerLog(value), /pg_dump/);
   assert.doesNotMatch(dockerLog(value), /EXPECTED_REVISION=/);
+});
+
+test("candidate startup failure restores prior API and web digests", (t) => {
+  const value = fixture(t);
+  const before = readFileSync(value.activeState, "utf8");
+  const result = runReconcile(value, { FAKE_MODE: "candidate-start-fail" });
+
+  assert.notEqual(result.status, 0);
+  assert.equal(readFileSync(value.activeState, "utf8"), before);
+  const log = dockerLog(value);
+  assert.equal((log.match(/up --no-deps -d api web/g) ?? []).length, 2);
+  assert.match(log, new RegExp(`EXPECTED_REVISION=${priorRevision}`));
+});
+
+test("first-deployment startup failure stops the partial candidate", (t) => {
+  const value = fixture(t, { active: false });
+  const result = runReconcile(value, { FAKE_MODE: "candidate-start-fail" });
+
+  assert.notEqual(result.status, 0);
+  assert.equal(existsSync(value.activeState), false);
+  assert.match(dockerLog(value), /stop api web/);
 });
 
 test("healthy candidate promotion preserves prior state for rollback", (t) => {

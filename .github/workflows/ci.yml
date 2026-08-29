@@ -140,7 +140,7 @@ jobs:
 
   containers:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -153,13 +153,19 @@ jobs:
         with:
           node-version: "22"
           cache: pnpm
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - run: pnpm install --frozen-lockfile
       - name: Verify POC topology and operations contracts
         run: pnpm test:ops
-      - name: Build production targets
+      - name: Build both targets for AMD64 and ARM64
         run: |
-          docker build --target web --build-arg VCS_REF="$GITHUB_SHA" -t dialed-web:ci .
-          docker build --target api --build-arg VCS_REF="$GITHUB_SHA" -t dialed-api:ci .
+          docker buildx build --target web --platform linux/amd64,linux/arm64 --build-arg VCS_REF="$GITHUB_SHA" --output type=cacheonly .
+          docker buildx build --target api --platform linux/amd64,linux/arm64 --build-arg VCS_REF="$GITHUB_SHA" --output type=cacheonly .
+          docker buildx build --target web --platform linux/amd64 --build-arg VCS_REF="$GITHUB_SHA" --load -t dialed-web:ci .
+          docker buildx build --target api --platform linux/amd64 --build-arg VCS_REF="$GITHUB_SHA" --load -t dialed-api:ci .
       - name: Inspect production image boundaries
         run: |
           for image in dialed-web:ci dialed-api:ci; do
@@ -172,6 +178,49 @@ jobs:
             test -n "$(find /app -path "*/migrations/*.sql" -print -quit)"
             test -z "$(find /app \( -path "*/node_modules/drizzle-kit" -o -path "*/node_modules/esbuild" \) -print -quit)"
           '
+      - name: Exercise production container health checks
+        run: |
+          cleanup() {
+            docker rm -f dialed-web-ci dialed-api-ci dialed-postgres-ci >/dev/null 2>&1 || true
+            docker network rm dialed-ci >/dev/null 2>&1 || true
+          }
+          wait_healthy() {
+            container=$1
+            for _attempt in $(seq 1 60); do
+              status=$(docker inspect --format '{{.State.Health.Status}}' "$container")
+              if [ "$status" = healthy ]; then return 0; fi
+              if [ "$status" = unhealthy ]; then break; fi
+              sleep 2
+            done
+            docker logs "$container"
+            return 1
+          }
+          trap cleanup EXIT
+          docker network create dialed-ci
+          docker run -d --name dialed-postgres-ci --network dialed-ci \
+            -e POSTGRES_DB=dialed -e POSTGRES_USER=dialed -e POSTGRES_PASSWORD=dialed \
+            postgres:16.15-alpine3.24
+          for _attempt in $(seq 1 60); do
+            if docker exec dialed-postgres-ci pg_isready -U dialed -d dialed; then break; fi
+            sleep 1
+          done
+          docker exec dialed-postgres-ci pg_isready -U dialed -d dialed
+          docker run --rm --network dialed-ci \
+            -e DATABASE_URL=postgresql://dialed:dialed@dialed-postgres-ci:5432/dialed \
+            dialed-api:ci node dist/migrate.js
+          docker run -d --name dialed-api-ci --network dialed-ci --network-alias api \
+            -e API_HOST=0.0.0.0 \
+            -e APP_URL=http://dialed-web-ci:3000 \
+            -e DATABASE_URL=postgresql://dialed:dialed@dialed-postgres-ci:5432/dialed \
+            -e BETTER_AUTH_SECRET=ci-only-secret-ci-only-secret-ci \
+            -e GOOGLE_CLIENT_ID=ci-google-client \
+            -e GOOGLE_CLIENT_SECRET=ci-google-secret \
+            dialed-api:ci
+          wait_healthy dialed-api-ci
+          docker run -d --name dialed-web-ci --network dialed-ci \
+            -e HOSTNAME=0.0.0.0 -e PORT=3000 \
+            dialed-web:ci
+          wait_healthy dialed-web-ci
 
   publish:
     needs: [verify, audit, database, e2e, containers]

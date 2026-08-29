@@ -5,6 +5,13 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck source=common
 . "$SCRIPT_DIR/common"
 
+reconcile_mode=${1:-normal}
+[ "$#" -le 1 ] || die "usage: reconcile [force]"
+case "$reconcile_mode" in
+  normal | force) ;;
+  *) die "usage: reconcile [force]" ;;
+esac
+
 validate_revision() {
   revision_value=$1
   printf '%s\n' "$revision_value" | grep -Eq '^[0-9a-f]{40}$' ||
@@ -198,6 +205,18 @@ fi
 if [ "$has_prior" = "1" ] &&
   [ "$candidate_web" = "$prior_web" ] &&
   [ "$candidate_api" = "$prior_api" ]; then
+  if [ "$reconcile_mode" = "force" ]; then
+    WEB_IMAGE=$prior_web
+    API_IMAGE=$prior_api
+    APP_REVISION=$prior_revision
+    export WEB_IMAGE API_IMAGE APP_REVISION
+    compose up --no-deps -d postgres
+    wait_for_postgres || die "PostgreSQL did not become ready"
+    compose up --no-deps -d api web
+    wait_for_application "$prior_revision" ||
+      die "forced configuration reconciliation did not become healthy"
+    compose up --no-deps -d cloudflared
+  fi
   exit 0
 fi
 
@@ -229,9 +248,14 @@ if [ "$has_prior" = "1" ]; then
 fi
 
 compose run --rm --no-deps migrate
-compose up --no-deps -d api web
 
-if ! wait_for_application "$candidate_revision"; then
+candidate_ready=0
+if compose up --no-deps -d api web &&
+  wait_for_application "$candidate_revision"; then
+  candidate_ready=1
+fi
+
+if [ "$candidate_ready" != "1" ]; then
   if [ "$has_prior" = "1" ]; then
     WEB_IMAGE=$prior_web
     API_IMAGE=$prior_api
@@ -240,10 +264,10 @@ if ! wait_for_application "$candidate_revision"; then
     compose up --no-deps -d api web
     wait_for_application "$prior_revision" ||
       die "candidate failed and the prior revision did not recover"
-    die "candidate health verification failed; prior revision restored"
+    die "candidate startup or health verification failed; prior revision restored"
   fi
   compose stop api web >/dev/null 2>&1 || true
-  die "candidate health verification failed; no rollback target exists"
+  die "candidate startup or health verification failed; no rollback target exists"
 fi
 
 compose up --no-deps -d cloudflared

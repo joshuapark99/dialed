@@ -23,7 +23,7 @@ Clone a reviewed revision of this public repository onto the Pi. Host assets cha
 
 ## 2. Prepare SSD storage and secrets
 
-Choose two absolute SSD-backed paths. The backup directory must not be inside the live PostgreSQL directory. Backups on the same SSD help with deployment recovery but do not protect against device loss, so copy them off the Pi separately.
+Choose two absolute, dedicated SSD-backed child paths. Do not use a mount point or broad system directory such as `/`, `/mnt`, or `/var`; the installer creates missing directories as root with mode `0700` and rejects unsafe existing permissions. The data and backup paths must not contain one another. Backups on the same SSD help with deployment recovery but do not protect against device loss, so copy them off the Pi separately.
 
 Run the installer once to place the value-free template:
 
@@ -67,6 +67,8 @@ Create the public hostname but leave it disabled until local validation is compl
 http://web:3000
 ```
 
+Enable the route's **Protect with Access** option and associate it with the POC Access application. This origin-side protection is required in addition to creating Access policies; requests reaching the connector without a valid Access identity or service token must be rejected.
+
 Create one Access self-hosted application for the POC hostname with a 24-hour session and default-deny behavior. Add:
 
 - an Allow policy containing only the owner's and invited testers' exact email addresses; One-time PIN is sufficient for the POC;
@@ -97,7 +99,7 @@ In GitHub, create an environment named `poc` with:
 - secret `CF_ACCESS_CLIENT_ID`: the Access service-token client ID;
 - secret `CF_ACCESS_CLIENT_SECRET`: the Access service-token secret.
 
-Only the `main` deployment job uses this environment. The tunnel token and all application/database secrets stay on the Pi. If desired, add required reviewers to the environment; doing so makes publication wait for approval.
+Only the `main` smoke-verification job uses this environment. The tunnel token and all application/database secrets stay on the Pi. If desired, add required reviewers to the environment; doing so makes external deployment verification wait for approval, but the gated images are published first.
 
 ## 6. Install and validate locally
 
@@ -139,7 +141,7 @@ Copy a backup to another device or storage provider and perform a restore rehear
 
 Enable the Cloudflare public-hostname route. In a private browser window, confirm an unapproved identity is denied, an invited exact email can pass Access, and Google login returns to Dialed.
 
-The CI deployment check sends the two Access service-token headers and polls:
+The CI deployment check first requests `/healthz` without credentials and requires an Access denial or Cloudflare Access login redirect. It then sends the two Access service-token headers and polls:
 
 - `/healthz` for web status `ok`;
 - `/api/readyz` for API/database status `ready`.
@@ -203,7 +205,7 @@ Database recreation is destructive. Resolve the exact archive and target databas
 
 Application releases happen through `main`. Host-level changes do not: update the checkout to a reviewed commit and rerun `sudo ops/poc/bin/install`. The installer validates before reloading systemd and preserves `/etc/dialed/poc.env`.
 
-Rotate a credential by pausing the deploy timer, editing the root-only environment file, and forcing reconciliation. Rotate the Cloudflare tunnel token in Cloudflare and on the Pi; rotate the Access service token in Cloudflare and GitHub; rotate Google and application secrets at their issuers. A PostgreSQL password change also requires changing the database role password, not only the environment file.
+Rotate a credential by pausing the deploy timer, editing the root-only environment file, and running `sudo /opt/dialed/bin/reconcile force`. The force mode recreates the digest-pinned services even when no image changed, then requires application health before recreating the tunnel connector. Rotate the Cloudflare tunnel token in Cloudflare and on the Pi; rotate the Access service token in Cloudflare and GitHub; rotate Google and application secrets at their issuers. A PostgreSQL password change also requires changing the database role password, not only the environment file.
 
 ## Teardown
 
