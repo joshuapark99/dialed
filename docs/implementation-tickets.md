@@ -81,6 +81,17 @@ Status: Complete
 - Stage the complete Coffee, bag, equipment, and brew dependency graph under the destination account, then delete the anonymous source only after cloud acknowledgement.
 - Preserve recovery state for retry, reject same-ID/different-content conflicts without writes, and cover consent, defer, retry, ordering, and isolation in browser tests.
 
+## DIAL-010: Raspberry Pi POC delivery
+
+Status: Implementation complete; environment verification pending
+
+- Build and publish matching multi-platform web/API images after portable Node.js, database, browser, security, Compose, and container gates pass.
+- Reconcile releases from a 64-bit Raspberry Pi through exact image digests, pre-migration backups, health/revision checks, and application-only rollback.
+- Route only through Cloudflare Tunnel and exact-email or service-token Cloudflare Access policies; publish no host ports and keep runtime secrets on the Pi.
+- Install root-owned systemd deployment and backup timers and document bootstrap, OAuth, recovery, credential rotation, host updates, and teardown.
+
+Repository-owned verification covers source tests, migration idempotency, Compose topology, image builds, workflow permissions, and external revision checks. Operator-owned verification remains the physical SSD and 64-bit Pi setup, Cloudflare and Google configuration, first live deployment, restore rehearsal, off-device backup transport, and invited-tester acceptance. The ticket becomes complete after those environment checks pass.
+
 ## Later releases
 
 - Pour-over brew method and method-specific coaching.

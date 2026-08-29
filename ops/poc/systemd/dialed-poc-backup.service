@@ -1,0 +1,14 @@
+[Unit]
+Description=Back up the Dialed POC PostgreSQL database
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/dialed/bin/backup scheduled
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+TimeoutStartSec=30min

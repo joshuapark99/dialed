@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for a new Dialed POC release each minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=true
+AccuracySec=10s
+Unit=dialed-poc-deploy.service
+
+[Install]
+WantedBy=timers.target

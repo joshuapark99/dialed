@@ -1,0 +1,131 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+POC_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+REPOSITORY_ROOT=$(CDPATH= cd -- "$POC_ROOT/../.." && pwd)
+# shellcheck source=common
+. "$SCRIPT_DIR/common"
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 is required"
+}
+
+require_compose_version() {
+  compose_version=$(docker compose version --short 2>/dev/null | sed 's/^v//; s/-.*//')
+  compose_major=$(printf '%s\n' "$compose_version" | cut -d. -f1)
+  compose_minor=$(printf '%s\n' "$compose_version" | cut -d. -f2)
+  case "$compose_major.$compose_minor" in
+    *[!0-9.]*) die "could not parse Docker Compose version: $compose_version" ;;
+  esac
+  if [ "$compose_major" -lt 2 ] || {
+    [ "$compose_major" -eq 2 ] && [ "$compose_minor" -lt 24 ]
+  }; then
+    die "Docker Compose 2.24 or newer is required; found $compose_version"
+  fi
+}
+
+[ "$(id -u)" = "0" ] || die "run this installer as root"
+case "$(uname -m)" in
+  aarch64 | arm64) ;;
+  *) die "the POC host must run a 64-bit ARM OS (aarch64)" ;;
+esac
+
+require_command docker
+require_command install
+require_command realpath
+require_command systemctl
+require_compose_version
+docker info >/dev/null 2>&1 || die "the Docker daemon is not available"
+
+install -d -o root -g root -m 0700 /etc/dialed /var/lib/dialed
+install -o root -g root -m 0600 \
+  "$POC_ROOT/poc.env.example" \
+  /etc/dialed/poc.env.example
+
+if [ ! -e /etc/dialed/poc.env ]; then
+  die "create /etc/dialed/poc.env from /etc/dialed/poc.env.example, fill every value, set root:root ownership and mode 0600, then rerun"
+fi
+
+DIALED_ENV_FILE=/etc/dialed/poc.env
+export DIALED_ENV_FILE
+load_poc_env
+for required_name in \
+  APP_URL \
+  BETTER_AUTH_SECRET \
+  GOOGLE_CLIENT_ID \
+  GOOGLE_CLIENT_SECRET \
+  POSTGRES_USER \
+  POSTGRES_PASSWORD \
+  POSTGRES_DB \
+  TUNNEL_TOKEN \
+  DIALED_DATA_DIR \
+  DIALED_BACKUP_DIR; do
+  eval "required_value=\${$required_name:-}"
+  require_value "$required_name" "$required_value"
+done
+
+printf '%s\n' "$APP_URL" |
+  grep -Eq '^https://[A-Za-z0-9.-]+(:[0-9]+)?$' ||
+  die "APP_URL must be an HTTPS origin without credentials, path, query, or trailing slash"
+[ "${#BETTER_AUTH_SECRET}" -ge 32 ] ||
+  die "BETTER_AUTH_SECRET must contain at least 32 characters"
+printf '%s\n' "$POSTGRES_PASSWORD" | grep -Eq '^[A-Za-z0-9._~-]+$' ||
+  die "POSTGRES_PASSWORD must use only URL-safe unreserved characters"
+
+require_absolute_path "DIALED_DATA_DIR" "$DIALED_DATA_DIR"
+require_absolute_path "DIALED_BACKUP_DIR" "$DIALED_BACKUP_DIR"
+data_path=$(realpath -m -- "$DIALED_DATA_DIR")
+postgres_path=$data_path/postgres
+backup_path=$(realpath -m -- "$DIALED_BACKUP_DIR")
+case "$backup_path" in
+  "$postgres_path" | "$postgres_path"/*)
+    die "DIALED_BACKUP_DIR must be outside $postgres_path"
+    ;;
+esac
+
+install -d -o root -g root -m 0700 "$data_path" "$backup_path"
+if [ -e "$postgres_path" ]; then
+  [ -d "$postgres_path" ] || die "$postgres_path must be a directory"
+  [ ! -L "$postgres_path" ] || die "$postgres_path must not be a symbolic link"
+else
+  install -d -o root -g root -m 0700 "$postgres_path"
+fi
+install -d -o root -g root -m 0755 /opt/dialed/bin
+install -o root -g root -m 0644 \
+  "$REPOSITORY_ROOT/compose.poc.yaml" \
+  /opt/dialed/compose.poc.yaml
+for executable in common backup reconcile check-external.mjs; do
+  install -o root -g root -m 0755 \
+    "$POC_ROOT/bin/$executable" \
+    "/opt/dialed/bin/$executable"
+done
+for library in "$POC_ROOT"/lib/*.mjs; do
+  install -D -o root -g root -m 0644 \
+    "$library" \
+    "/opt/dialed/lib/$(basename "$library")"
+done
+for unit in "$POC_ROOT"/systemd/*; do
+  install -o root -g root -m 0644 \
+    "$unit" \
+    "/etc/systemd/system/$(basename "$unit")"
+done
+
+zero_revision=0000000000000000000000000000000000000000
+zero_digest=0000000000000000000000000000000000000000000000000000000000000000
+WEB_IMAGE="ghcr.io/joshuapark99/dialed-web@sha256:$zero_digest"
+API_IMAGE="ghcr.io/joshuapark99/dialed-api@sha256:$zero_digest"
+APP_REVISION=$zero_revision
+export WEB_IMAGE API_IMAGE APP_REVISION
+docker compose \
+  --env-file /etc/dialed/poc.env \
+  -f /opt/dialed/compose.poc.yaml \
+  config --quiet
+
+systemctl daemon-reload
+systemctl enable --now dialed-poc-deploy.timer dialed-poc-backup.timer
+
+printf '%s\n' \
+  "Dialed POC host assets installed." \
+  "The deploy timer will reconcile the public :poc images within one minute." \
+  "Rerun this installer after updating the repository checkout to update host assets."

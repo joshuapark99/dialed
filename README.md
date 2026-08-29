@@ -59,9 +59,12 @@ pnpm format:check
 pnpm lint
 pnpm typecheck
 pnpm test
+pnpm test:db-integration
+pnpm test:ops
 pnpm build
 pnpm exec playwright install chromium
 pnpm test:e2e
+pnpm audit --prod --audit-level=high
 ```
 
 The recommendation engine is deterministic and versioned. Its tests cover metric calculations, comparison selection, grinder calibration, capability filtering, mechanical flow problems, taste guidance, and the one-change invariant.
@@ -75,6 +78,8 @@ docker compose up --build
 ```
 
 Set real values for `BETTER_AUTH_SECRET`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET` before exposing the stack outside local development. Production deployments should use managed PostgreSQL backups, TLS at the ingress, and the same public origin for the web app and `/api` routes.
+
+For the Raspberry Pi proof-of-concept stack, Cloudflare Access setup, pull-based CI/CD, backups, rollback, and teardown procedures, see [ops/poc/README.md](ops/poc/README.md). The POC Compose topology publishes no host ports and is separate from the local development stack.
 
 ## Delivery notes
 
