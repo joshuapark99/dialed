@@ -2821,6 +2821,7 @@ describe("owner-aware synchronization", () => {
   });
 
   it("waits for an in-flight sync before clearing and starts a fresh pull at cursor zero", async () => {
+    vi.stubGlobal("navigator", { onLine: true, locks: null });
     let releaseFirstPull!: () => void;
     let markFirstPullStarted!: () => void;
     const firstPullBlocked = new Promise<void>((resolve) => {
@@ -2853,6 +2854,7 @@ describe("owner-aware synchronization", () => {
           key === "sync-cursor" && !cleared ? "17" : undefined,
         ),
       }),
+      fakeOwnerLock(),
     );
 
     const inFlight = coordinator.synchronize(alice);
@@ -3056,6 +3058,7 @@ describe("owner-aware synchronization", () => {
   });
 
   it("reports that the cache was cleared when the fresh pull fails", async () => {
+    vi.stubGlobal("navigator", { onLine: true, locks: null });
     const coordinator = createSyncCoordinator(
       dependencies({
         fetch: vi.fn(async (input: string | URL | Request) =>
@@ -3064,6 +3067,7 @@ describe("owner-aware synchronization", () => {
             : response(503),
         ),
       }),
+      fakeOwnerLock(),
     );
 
     const error = await coordinator
@@ -3075,6 +3079,7 @@ describe("owner-aware synchronization", () => {
   });
 
   it("runs a normal sync for a joiner when reset refuses pending operations", async () => {
+    vi.stubGlobal("navigator", { onLine: true, locks: null });
     let releaseReset!: () => void;
     const resetBlocked = new Promise<void>((resolve) => {
       releaseReset = resolve;
@@ -3084,7 +3089,10 @@ describe("owner-aware synchronization", () => {
         ? response(200, { user: aliceAccount })
         : response(200, { operations: [], cursor: 0, hasMore: false }),
     );
-    const coordinator = createSyncCoordinator(dependencies({ fetch }));
+    const coordinator = createSyncCoordinator(
+      dependencies({ fetch }),
+      fakeOwnerLock(),
+    );
     const reset = coordinator.resetAndSynchronize(alice, async () => {
       await resetBlocked;
       return {

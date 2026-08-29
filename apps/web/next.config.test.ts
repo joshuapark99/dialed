@@ -1,20 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { shouldPollForFileChanges } from "./lib/dev-file-watching";
-import nextConfig from "./next.config";
-
-function applyWebpackConfig(
-  dev: boolean,
-  watchOptions?: Record<string, unknown>,
-) {
-  const configureWebpack = nextConfig.webpack;
-  expect(configureWebpack).toBeTypeOf("function");
-  if (!configureWebpack) throw new Error("Webpack configuration is missing");
-
-  return configureWebpack(
-    { watchOptions } as Parameters<typeof configureWebpack>[0],
-    { dev } as Parameters<typeof configureWebpack>[1],
-  );
-}
+import {
+  configureFileWatching,
+  shouldPollForFileChanges,
+} from "./lib/dev-file-watching";
 
 describe("Next.js development file watching", () => {
   it("polls only for Linux workspaces on mounted filesystems", () => {
@@ -23,25 +11,26 @@ describe("Next.js development file watching", () => {
     expect(shouldPollForFileChanges("darwin", "/mnt/work/dialed")).toBe(false);
   });
 
-  it("adds polling in development and leaves production watching unchanged", () => {
-    const development = applyWebpackConfig(true, {
-      ignored: ["**/node_modules/**"],
-    });
-    expect(development.watchOptions).toEqual({
+  it("adds polling only when the caller explicitly enables it", () => {
+    const enabled = { watchOptions: { ignored: ["**/node_modules/**"] } };
+    expect(configureFileWatching(enabled, true, true).watchOptions).toEqual({
       ignored: ["**/node_modules/**"],
       poll: 1_000,
       aggregateTimeout: 200,
     });
 
-    const productionWatchOptions = { ignored: ["**/.next/**"] };
-    const production = applyWebpackConfig(false, productionWatchOptions);
-    expect(production.watchOptions).toBe(productionWatchOptions);
-  });
-
-  it("creates development watcher settings when none exist", () => {
-    expect(applyWebpackConfig(true).watchOptions).toEqual({
-      poll: 1_000,
-      aggregateTimeout: 200,
+    const pollingDisabled = {
+      watchOptions: { ignored: ["**/node_modules/**"] },
+    };
+    expect(configureFileWatching(pollingDisabled, true, false)).toBe(
+      pollingDisabled,
+    );
+    expect(pollingDisabled.watchOptions).toEqual({
+      ignored: ["**/node_modules/**"],
     });
+
+    const production = { watchOptions: { ignored: ["**/.next/**"] } };
+    expect(configureFileWatching(production, false, true)).toBe(production);
+    expect(production.watchOptions).toEqual({ ignored: ["**/.next/**"] });
   });
 });

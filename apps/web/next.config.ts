@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 import { fileURLToPath } from "node:url";
-import { shouldPollForFileChanges } from "./lib/dev-file-watching";
+import {
+  configureFileWatching,
+  shouldPollForFileChanges,
+} from "./lib/dev-file-watching";
 
 const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
 const apiOrigin = process.env.API_INTERNAL_URL ?? "http://127.0.0.1:3001";
@@ -21,14 +24,7 @@ const nextConfig: NextConfig = {
     webpackBuildWorker: false,
   },
   webpack(config, { dev }) {
-    if (dev && pollForFileChanges) {
-      config.watchOptions = {
-        ...config.watchOptions,
-        poll: 1_000,
-        aggregateTimeout: 200,
-      };
-    }
-    return config;
+    return configureFileWatching(config, dev, pollForFileChanges);
   },
   async rewrites() {
     return [
