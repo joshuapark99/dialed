@@ -11,6 +11,10 @@
     "./schema": {
       "types": "./src/schema.ts",
       "import": "./dist/schema.js"
+    },
+    "./migrate": {
+      "types": "./src/migrate.ts",
+      "import": "./dist/migrate.js"
     }
   },
   "files": [
@@ -22,6 +26,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "tsc -p tsconfig.json --noEmit",
+    "test:integration": "node --import tsx --test test/*.integration.test.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate"
   },
@@ -30,7 +35,9 @@
     "postgres": "^3.4.7"
   },
   "devDependencies": {
+    "@types/node": "^22.20.1",
     "drizzle-kit": "^0.31.4",
+    "tsx": "^4.23.12",
     "typescript": "^5.9.2"
   }
 }

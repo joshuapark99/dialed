@@ -17,6 +17,7 @@
     "format:check": "prettier --check .",
     "lint": "turbo run lint",
     "test": "turbo run test",
+    "test:db-integration": "pnpm --filter @dialed/db test:integration",
     "test:e2e": "playwright test",
     "typecheck": "turbo run typecheck"
   },
