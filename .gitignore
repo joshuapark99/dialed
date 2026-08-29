@@ -40,3 +40,8 @@ venv/
 
 # Isolated feature workspaces
 .worktrees/
+
+# Raspberry Pi POC runtime state and local backup artifacts
+ops/poc/.deploy.env
+ops/poc/.rollback.env
+ops/poc/**/*.dump

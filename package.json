@@ -19,6 +19,7 @@
     "test": "turbo run test",
     "test:db-integration": "pnpm --filter @dialed/db test:integration",
     "test:e2e": "playwright test",
+    "test:ops": "node --test ops/poc/test/*.test.mjs",
     "typecheck": "turbo run typecheck"
   },
   "devDependencies": {
