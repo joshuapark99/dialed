@@ -44,6 +44,16 @@ test("external smoke verification uses the protected POC environment", () => {
   assert.match(smoke, /cancel-in-progress:\s*false/);
 });
 
+test("workflow runs for one ref cannot race publication and smoke checks", () => {
+  const settings = workflow.slice(0, workflow.indexOf("\njobs:\n"));
+  assert.match(settings, /concurrency:/);
+  assert.match(
+    settings,
+    /group:\s*ci-\$\{\{ github\.workflow \}\}-\$\{\{ github\.ref \}\}/,
+  );
+  assert.match(settings, /cancel-in-progress:\s*false/);
+});
+
 test("every GitHub action is pinned to an immutable commit", () => {
   const actions = [...workflow.matchAll(/^\s+(?:-\s+)?uses:\s+(\S+)/gm)].map(
     ([, action]) => action,
