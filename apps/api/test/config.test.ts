@@ -15,6 +15,14 @@ test("configuration provides local API defaults", () => {
   const config = readConfig(validEnvironment);
   assert.equal(config.API_HOST, "0.0.0.0");
   assert.equal(config.API_PORT, 3001);
+  assert.equal(config.APP_REVISION, "development");
+});
+
+test("configuration accepts the deployed revision", () => {
+  const revision = "0123456789abcdef0123456789abcdef01234567";
+  const config = readConfig({ ...validEnvironment, APP_REVISION: revision });
+
+  assert.equal(config.APP_REVISION, revision);
 });
 
 test("configuration reports every missing production dependency", () => {

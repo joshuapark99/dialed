@@ -22,6 +22,7 @@ import {
 export interface ServerDependencies {
   auth: AuthService;
   store: SyncStore;
+  revision?: string;
   logger?: boolean;
 }
 
@@ -91,6 +92,7 @@ export function createServer(
   dependencies: ServerDependencies,
 ): FastifyInstance {
   const app = Fastify({ logger: dependencies.logger ?? false });
+  const revision = dependencies.revision ?? "development";
 
   void app.register(swagger, {
     openapi: {
@@ -123,14 +125,14 @@ export function createServer(
     });
   });
 
-  app.get("/healthz", async () => ({ status: "ok" }));
+  app.get("/healthz", async () => ({ status: "ok", revision }));
 
   app.get("/readyz", async (_request, reply) => {
     try {
       await dependencies.store.health();
-      return { status: "ready" };
+      return { status: "ready", revision };
     } catch {
-      return reply.code(503).send({ status: "unavailable" });
+      return reply.code(503).send({ status: "unavailable", revision });
     }
   });
 

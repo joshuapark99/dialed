@@ -15,6 +15,7 @@ const auth = createBetterAuthService({
 const app = createServer({
   auth,
   store: new PostgresSyncStore(database.db),
+  revision: config.APP_REVISION,
   logger: true,
 });
 

@@ -121,18 +121,41 @@ const coffeeBagPayload = {
   createdAt: "2026-08-22T12:00:00.000Z",
 } as const;
 
-test("health and readiness expose different concerns", async () => {
+test("health and readiness expose revision and dependency state", async () => {
   const store = new MemoryStore();
-  const app = createServer({ auth: signedOut, store });
-  assert.equal(
-    (await app.inject({ method: "GET", url: "/healthz" })).statusCode,
-    200,
-  );
+  const revision = "0123456789abcdef0123456789abcdef01234567";
+  const app = createServer({ auth: signedOut, store, revision });
+
+  const health = await app.inject({ method: "GET", url: "/healthz" });
+  assert.equal(health.statusCode, 200);
+  assert.deepEqual(health.json(), { status: "ok", revision });
+
+  const ready = await app.inject({ method: "GET", url: "/readyz" });
+  assert.equal(ready.statusCode, 200);
+  assert.deepEqual(ready.json(), { status: "ready", revision });
+
   store.unavailable = true;
-  assert.equal(
-    (await app.inject({ method: "GET", url: "/readyz" })).statusCode,
-    503,
+  const unavailable = await app.inject({
+    method: "GET",
+    url: "/readyz",
+  });
+  assert.equal(unavailable.statusCode, 503);
+  assert.deepEqual(unavailable.json(), {
+    status: "unavailable",
+    revision,
+  });
+
+  await app.close();
+});
+
+test("health defaults to the development revision", async () => {
+  const app = createServer({ auth: signedOut, store: new MemoryStore() });
+
+  assert.deepEqual(
+    (await app.inject({ method: "GET", url: "/healthz" })).json(),
+    { status: "ok", revision: "development" },
   );
+
   await app.close();
 });
 
