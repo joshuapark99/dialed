@@ -55,6 +55,33 @@ write_state() {
   chmod 0600 "$state_path"
 }
 
+prune_repository_images() {
+  image_repository=$1
+  active_image=$2
+  rollback_image=$3
+
+  docker image ls \
+    --digests \
+    --no-trunc \
+    --format '{{.Repository}}@{{.Digest}}' \
+    "$image_repository" |
+    sort -u |
+    while IFS= read -r image_reference; do
+      case "$image_reference" in
+        "$active_image" | "$rollback_image" | "$image_repository@<none>" | "")
+          continue
+          ;;
+        "$image_repository"@sha256:*)
+          image_digest=${image_reference#"$image_repository@sha256:"}
+          if printf '%s\n' "$image_digest" |
+            grep -Eq '^[0-9a-f]{64}$'; then
+            docker image rm "$image_reference" >/dev/null 2>&1 || true
+          fi
+          ;;
+      esac
+    done
+}
+
 check_service_revision() {
   service_name=$1
   endpoint=$2
@@ -229,4 +256,6 @@ fi
 mv "$candidate_state" "$DIALED_ACTIVE_STATE"
 candidate_state=
 compose up --no-deps -d cloudflared
+prune_repository_images "$WEB_REPOSITORY" "$candidate_web" "$prior_web"
+prune_repository_images "$API_REPOSITORY" "$candidate_api" "$prior_api"
 trap - 0 1 2 15

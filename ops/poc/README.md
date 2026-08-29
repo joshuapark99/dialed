@@ -148,7 +148,7 @@ Both responses must report the Git commit that produced the images. A published 
 
 ## Routine operation
 
-The deployment timer checks the mutable `:poc` discovery tags each minute, resolves both to exact registry digests, rejects mixed revisions, backs up before migration, runs migrations, starts the candidate, and promotes it only after local health checks pass. A failed health check restores the prior application image digests; it never restores the database automatically.
+The deployment timer checks the mutable `:poc` discovery tags each minute, resolves both to exact registry digests, rejects mixed revisions, backs up before migration, runs migrations, starts the candidate, and promotes it only after local health checks pass. It then prunes older Dialed image digests while preserving the active and rollback images. A failed health check restores the prior application image digests; it never restores the database automatically.
 
 Useful commands:
 

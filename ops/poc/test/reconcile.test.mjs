@@ -29,6 +29,10 @@ const webPrior =
   "ghcr.io/joshuapark99/dialed-web@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const apiPrior =
   "ghcr.io/joshuapark99/dialed-api@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const webExpired =
+  "ghcr.io/joshuapark99/dialed-web@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const apiExpired =
+  "ghcr.io/joshuapark99/dialed-api@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
 function stateText(webImage, apiImage, revision) {
   return [
@@ -96,6 +100,9 @@ case "$command_line" in
   *"image inspect"*"RepoDigests"*"dialed-api:poc"*) printf '%s\n' "$FAKE_API_IMAGE"; exit 0 ;;
   *"image inspect"*"org.opencontainers.image.revision"*"dialed-web@sha256:"*) printf '%s\n' "$FAKE_WEB_REVISION"; exit 0 ;;
   *"image inspect"*"org.opencontainers.image.revision"*"dialed-api@sha256:"*) printf '%s\n' "$FAKE_API_REVISION"; exit 0 ;;
+  *"image ls"*"dialed-web"*) printf '%s\n' "$FAKE_WEB_IMAGE" "$FAKE_WEB_PRIOR" "$FAKE_WEB_EXPIRED"; exit 0 ;;
+  *"image ls"*"dialed-api"*) printf '%s\n' "$FAKE_API_IMAGE" "$FAKE_API_PRIOR" "$FAKE_API_EXPIRED"; exit 0 ;;
+  "image rm "*) exit 0 ;;
   *"pg_isready"*) exit 0 ;;
   *"pg_dump"*)
     if [ "$FAKE_MODE" = "backup-fail" ]; then exit 23; fi
@@ -157,6 +164,10 @@ function runReconcile(value, overrides = {}) {
       FAKE_WEB_REVISION: candidateRevision,
       FAKE_API_REVISION: candidateRevision,
       FAKE_PRIOR_REVISION: priorRevision,
+      FAKE_WEB_PRIOR: webPrior,
+      FAKE_API_PRIOR: apiPrior,
+      FAKE_WEB_EXPIRED: webExpired,
+      FAKE_API_EXPIRED: apiExpired,
       ...overrides,
     },
   });
@@ -228,6 +239,21 @@ test("healthy candidate promotion preserves prior state for rollback", (t) => {
   assert.match(dockerLog(value), /EXPECTED_REVISION=.*api node -e/);
   assert.match(dockerLog(value), /EXPECTED_REVISION=.*web node -e/);
   assert.doesNotMatch(readFileSync(value.activeState, "utf8"), /:poc/);
+});
+
+test("successful promotion prunes only expired Dialed image digests", (t) => {
+  const value = fixture(t);
+  const result = runReconcile(value);
+
+  assert.equal(result.status, 0, result.stderr);
+  const removals = dockerLog(value)
+    .split("\n")
+    .filter((line) => line.startsWith("image rm "))
+    .sort();
+  assert.deepEqual(removals, [
+    `image rm ${apiExpired}`,
+    `image rm ${webExpired}`,
+  ]);
 });
 
 test("unhealthy candidate recreates only prior API and web digests", (t) => {
