@@ -30,6 +30,14 @@ type PushedOperation = {
 
 type TransferRecords = Record<string, Array<Record<string, unknown>>>;
 
+const transferStoreNames = [
+  "ownedCoffees",
+  "ownedBeans",
+  "ownedMachines",
+  "ownedGrinders",
+  "ownedBrews",
+] as const;
+
 function accountFixtureCopies(records: TransferRecords) {
   return transferFixtureEntities.map(({ store, id }) => ({
     store,
@@ -60,23 +68,38 @@ async function putTransferRecords(
   page: Page,
   options: { anonymous?: boolean; destinationConflict?: boolean } = {},
 ) {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(async (requiredStores) => {
+          const metadata = await indexedDB.databases();
+          if (!metadata.some(({ name }) => name === "dialed-local")) {
+            return false;
+          }
+
+          const database = await new Promise<IDBDatabase>((resolve, reject) => {
+            const request = indexedDB.open("dialed-local");
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => resolve(request.result);
+          });
+          const ready = requiredStores.every((store) =>
+            database.objectStoreNames.contains(store),
+          );
+          database.close();
+          return ready;
+        }, transferStoreNames),
+      { message: "Dialed IndexedDB schema did not become ready" },
+    )
+    .toBe(true);
+
   await page.evaluate(
-    async ({ accountOwnerId, fixture, options }) => {
+    async ({ accountOwnerId, fixture, options, storeNames }) => {
       const database = await new Promise<IDBDatabase>((resolve, reject) => {
         const request = indexedDB.open("dialed-local");
         request.onerror = () => reject(request.error);
         request.onsuccess = () => resolve(request.result);
       });
-      const transaction = database.transaction(
-        [
-          "ownedCoffees",
-          "ownedBeans",
-          "ownedMachines",
-          "ownedGrinders",
-          "ownedBrews",
-        ],
-        "readwrite",
-      );
+      const transaction = database.transaction(storeNames, "readwrite");
       const coffees = transaction.objectStore("ownedCoffees");
       const bags = transaction.objectStore("ownedBeans");
       const machines = transaction.objectStore("ownedMachines");
@@ -202,7 +225,12 @@ async function putTransferRecords(
       });
       database.close();
     },
-    { accountOwnerId, fixture: transferFixture, options },
+    {
+      accountOwnerId,
+      fixture: transferFixture,
+      options,
+      storeNames: transferStoreNames,
+    },
   );
 }
 
