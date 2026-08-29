@@ -202,6 +202,24 @@ if [ -f "$DIALED_ACTIVE_STATE" ]; then
   prior_revision=$APP_REVISION
 fi
 
+restore_prior_or_stop() {
+  failure_message=$1
+  if [ "$has_prior" = "1" ]; then
+    compose stop cloudflared >/dev/null 2>&1 || true
+    WEB_IMAGE=$prior_web
+    API_IMAGE=$prior_api
+    APP_REVISION=$prior_revision
+    export WEB_IMAGE API_IMAGE APP_REVISION
+    compose up --no-deps -d api web
+    wait_for_application "$prior_revision" ||
+      die "$failure_message; prior revision did not recover"
+    compose up --no-deps -d cloudflared >/dev/null 2>&1 || true
+    die "$failure_message; prior revision restored"
+  fi
+  compose stop cloudflared api web >/dev/null 2>&1 || true
+  die "$failure_message; no rollback target exists"
+}
+
 if [ "$has_prior" = "1" ] &&
   [ "$candidate_web" = "$prior_web" ] &&
   [ "$candidate_api" = "$prior_api" ]; then
@@ -256,21 +274,12 @@ if compose up --no-deps -d api web &&
 fi
 
 if [ "$candidate_ready" != "1" ]; then
-  if [ "$has_prior" = "1" ]; then
-    WEB_IMAGE=$prior_web
-    API_IMAGE=$prior_api
-    APP_REVISION=$prior_revision
-    export WEB_IMAGE API_IMAGE APP_REVISION
-    compose up --no-deps -d api web
-    wait_for_application "$prior_revision" ||
-      die "candidate failed and the prior revision did not recover"
-    die "candidate startup or health verification failed; prior revision restored"
-  fi
-  compose stop api web >/dev/null 2>&1 || true
-  die "candidate startup or health verification failed; no rollback target exists"
+  restore_prior_or_stop "candidate startup or health verification failed"
 fi
 
-compose up --no-deps -d cloudflared
+if ! compose up --no-deps -d cloudflared; then
+  restore_prior_or_stop "tunnel startup failed"
+fi
 
 if [ "$has_prior" = "1" ]; then
   rollback_temporary=$(mktemp "$DIALED_STATE_DIR/.rollback.XXXXXX")

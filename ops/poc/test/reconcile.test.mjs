@@ -268,7 +268,7 @@ test("first-deployment startup failure stops the partial candidate", (t) => {
 
   assert.notEqual(result.status, 0);
   assert.equal(existsSync(value.activeState), false);
-  assert.match(dockerLog(value), /stop api web/);
+  assert.match(dockerLog(value), /stop cloudflared api web/);
 });
 
 test("healthy candidate promotion preserves prior state for rollback", (t) => {
@@ -310,7 +310,19 @@ test("tunnel startup failure prevents candidate state promotion", (t) => {
   assert.notEqual(result.status, 0);
   assert.equal(readFileSync(value.activeState, "utf8"), before);
   assert.equal(existsSync(value.rollbackState), false);
-  assert.doesNotMatch(dockerLog(value), /image rm /);
+  const log = dockerLog(value);
+  assert.equal((log.match(/up --no-deps -d api web/g) ?? []).length, 2);
+  assert.match(log, new RegExp(`EXPECTED_REVISION=${priorRevision}`));
+  assert.doesNotMatch(log, /image rm /);
+});
+
+test("first-deployment tunnel failure stops the candidate services", (t) => {
+  const value = fixture(t, { active: false });
+  const result = runReconcile(value, { FAKE_MODE: "tunnel-fail" });
+
+  assert.notEqual(result.status, 0);
+  assert.equal(existsSync(value.activeState), false);
+  assert.match(dockerLog(value), /stop cloudflared api web/);
 });
 
 test("unhealthy candidate recreates only prior API and web digests", (t) => {
