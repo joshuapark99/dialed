@@ -1,0 +1,232 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=common
+. "$SCRIPT_DIR/common"
+
+validate_revision() {
+  revision_value=$1
+  printf '%s\n' "$revision_value" | grep -Eq '^[0-9a-f]{40}$' ||
+    die "OCI revision must be a lowercase 40-character Git revision"
+}
+
+validate_exact_image() {
+  image_value=$1
+  image_repository=$2
+  case "$image_value" in
+    "$image_repository"@sha256:*) ;;
+    *) die "image must use an exact digest from $image_repository" ;;
+  esac
+  image_digest=${image_value#"$image_repository"@sha256:}
+  printf '%s\n' "$image_digest" | grep -Eq '^[0-9a-f]{64}$' ||
+    die "image digest must be lowercase sha256"
+}
+
+resolve_digest() {
+  image_repository=$1
+  discovery_image=$2
+  repo_digests=$(docker image inspect \
+    --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+    "$discovery_image")
+  exact_image=$(printf '%s\n' "$repo_digests" |
+    awk -v prefix="$image_repository@" 'index($0, prefix) == 1 { print; exit }')
+  [ -n "$exact_image" ] || die "no registry digest found for $discovery_image"
+  validate_exact_image "$exact_image" "$image_repository"
+  printf '%s\n' "$exact_image"
+}
+
+image_revision() {
+  docker image inspect \
+    --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+    "$1"
+}
+
+write_state() {
+  state_path=$1
+  state_web=$2
+  state_api=$3
+  state_revision=$4
+  {
+    printf 'WEB_IMAGE=%s\n' "$state_web"
+    printf 'API_IMAGE=%s\n' "$state_api"
+    printf 'APP_REVISION=%s\n' "$state_revision"
+  } >"$state_path"
+  chmod 0600 "$state_path"
+}
+
+check_service_revision() {
+  service_name=$1
+  endpoint=$2
+  expected_status=$3
+  expected_revision=$4
+  compose exec -T \
+    -e "EXPECTED_REVISION=$expected_revision" \
+    "$service_name" \
+    node -e '
+      const [endpoint, expectedStatus] = process.argv.slice(1);
+      fetch(endpoint)
+        .then(async (response) => {
+          const body = await response.json();
+          if (!response.ok || body.status !== expectedStatus || body.revision !== process.env.EXPECTED_REVISION) {
+            process.exit(1);
+          }
+        })
+        .catch(() => process.exit(1));
+    ' "$endpoint" "$expected_status"
+}
+
+wait_for_application() {
+  expected_revision=$1
+  timeout_seconds=${DIALED_HEALTH_TIMEOUT_SECONDS:-120}
+  interval_seconds=${DIALED_HEALTH_INTERVAL_SECONDS:-2}
+  deadline=$(( $(date +%s) + timeout_seconds ))
+  while :; do
+    if check_service_revision \
+      api \
+      http://127.0.0.1:3001/readyz \
+      ready \
+      "$expected_revision" &&
+      check_service_revision \
+        web \
+        http://127.0.0.1:3000/healthz \
+        ok \
+        "$expected_revision"; then
+      return 0
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep "$interval_seconds"
+  done
+}
+
+wait_for_postgres() {
+  timeout_seconds=${DIALED_POSTGRES_TIMEOUT_SECONDS:-120}
+  interval_seconds=${DIALED_HEALTH_INTERVAL_SECONDS:-2}
+  deadline=$(( $(date +%s) + timeout_seconds ))
+  while :; do
+    if compose exec -T postgres pg_isready \
+      -U "$POSTGRES_USER" \
+      -d "$POSTGRES_DB" >/dev/null; then
+      return 0
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep "$interval_seconds"
+  done
+}
+
+umask 077
+acquire_lock
+load_poc_env
+
+WEB_REPOSITORY=${DIALED_WEB_REPOSITORY:-ghcr.io/joshuapark99/dialed-web}
+API_REPOSITORY=${DIALED_API_REPOSITORY:-ghcr.io/joshuapark99/dialed-api}
+WEB_DISCOVERY_IMAGE=$WEB_REPOSITORY:poc
+API_DISCOVERY_IMAGE=$API_REPOSITORY:poc
+
+docker pull "$WEB_DISCOVERY_IMAGE" >/dev/null
+docker pull "$API_DISCOVERY_IMAGE" >/dev/null
+
+candidate_web=$(resolve_digest "$WEB_REPOSITORY" "$WEB_DISCOVERY_IMAGE")
+candidate_api=$(resolve_digest "$API_REPOSITORY" "$API_DISCOVERY_IMAGE")
+candidate_web_revision=$(image_revision "$candidate_web")
+candidate_api_revision=$(image_revision "$candidate_api")
+validate_revision "$candidate_web_revision"
+validate_revision "$candidate_api_revision"
+[ "$candidate_web_revision" = "$candidate_api_revision" ] ||
+  die "web and API OCI revisions do not match"
+candidate_revision=$candidate_web_revision
+
+DIALED_STATE_DIR=${DIALED_STATE_DIR:-/var/lib/dialed}
+DIALED_ACTIVE_STATE=${DIALED_ACTIVE_STATE:-$DIALED_STATE_DIR/active.env}
+DIALED_ROLLBACK_STATE=${DIALED_ROLLBACK_STATE:-$DIALED_STATE_DIR/rollback.env}
+DIALED_COMPOSE_FILE=${DIALED_COMPOSE_FILE:-/opt/dialed/compose.poc.yaml}
+require_absolute_path "DIALED_STATE_DIR" "$DIALED_STATE_DIR"
+require_absolute_path "DIALED_ACTIVE_STATE" "$DIALED_ACTIVE_STATE"
+require_absolute_path "DIALED_ROLLBACK_STATE" "$DIALED_ROLLBACK_STATE"
+require_absolute_path "DIALED_COMPOSE_FILE" "$DIALED_COMPOSE_FILE"
+export DIALED_ENV_FILE DIALED_ACTIVE_STATE DIALED_COMPOSE_FILE
+mkdir -p "$DIALED_STATE_DIR"
+[ -d "$DIALED_STATE_DIR" ] || die "$DIALED_STATE_DIR is not a directory"
+[ ! -L "$DIALED_STATE_DIR" ] || die "$DIALED_STATE_DIR must not be a symbolic link"
+chmod 0700 "$DIALED_STATE_DIR"
+
+has_prior=0
+prior_web=
+prior_api=
+prior_revision=
+if [ -f "$DIALED_ACTIVE_STATE" ]; then
+  load_active_state
+  require_value WEB_IMAGE "${WEB_IMAGE:-}"
+  require_value API_IMAGE "${API_IMAGE:-}"
+  require_value APP_REVISION "${APP_REVISION:-}"
+  validate_exact_image "$WEB_IMAGE" "$WEB_REPOSITORY"
+  validate_exact_image "$API_IMAGE" "$API_REPOSITORY"
+  validate_revision "$APP_REVISION"
+  has_prior=1
+  prior_web=$WEB_IMAGE
+  prior_api=$API_IMAGE
+  prior_revision=$APP_REVISION
+fi
+
+if [ "$has_prior" = "1" ] &&
+  [ "$candidate_web" = "$prior_web" ] &&
+  [ "$candidate_api" = "$prior_api" ]; then
+  exit 0
+fi
+
+candidate_state=$(mktemp "$DIALED_STATE_DIR/.candidate.XXXXXX")
+rollback_temporary=
+cleanup() {
+  rm -f -- "$candidate_state"
+  if [ -n "$rollback_temporary" ]; then
+    rm -f -- "$rollback_temporary"
+  fi
+}
+trap cleanup 0 1 2 15
+write_state \
+  "$candidate_state" \
+  "$candidate_web" \
+  "$candidate_api" \
+  "$candidate_revision"
+
+WEB_IMAGE=$candidate_web
+API_IMAGE=$candidate_api
+APP_REVISION=$candidate_revision
+export WEB_IMAGE API_IMAGE APP_REVISION
+
+compose up --no-deps -d postgres
+wait_for_postgres || die "PostgreSQL did not become ready"
+
+if [ "$has_prior" = "1" ]; then
+  DIALED_LOCK_HELD=1 sh "$SCRIPT_DIR/backup" predeploy >/dev/null
+fi
+
+compose run --rm --no-deps migrate
+compose up --no-deps -d api web
+
+if ! wait_for_application "$candidate_revision"; then
+  if [ "$has_prior" = "1" ]; then
+    WEB_IMAGE=$prior_web
+    API_IMAGE=$prior_api
+    APP_REVISION=$prior_revision
+    export WEB_IMAGE API_IMAGE APP_REVISION
+    compose up --no-deps -d api web
+    wait_for_application "$prior_revision" ||
+      die "candidate failed and the prior revision did not recover"
+    die "candidate health verification failed; prior revision restored"
+  fi
+  compose stop api web >/dev/null 2>&1 || true
+  die "candidate health verification failed; no rollback target exists"
+fi
+
+if [ "$has_prior" = "1" ]; then
+  rollback_temporary=$(mktemp "$DIALED_STATE_DIR/.rollback.XXXXXX")
+  cp "$DIALED_ACTIVE_STATE" "$rollback_temporary"
+  chmod 0600 "$rollback_temporary"
+  mv "$rollback_temporary" "$DIALED_ROLLBACK_STATE"
+  rollback_temporary=
+fi
+mv "$candidate_state" "$DIALED_ACTIVE_STATE"
+candidate_state=
+compose up --no-deps -d cloudflared
+trap - 0 1 2 15
