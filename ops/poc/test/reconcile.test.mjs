@@ -113,6 +113,10 @@ case "$command_line" in
     if [ "$FAKE_MODE" = "migration-fail" ]; then exit 25; fi
     exit 0
     ;;
+  *"up --no-deps -d cloudflared"*)
+    if [ "$FAKE_MODE" = "tunnel-fail" ]; then exit 27; fi
+    exit 0
+    ;;
   *"EXPECTED_REVISION="*" node -e "*)
     case "$command_line" in
       *"EXPECTED_REVISION=$FAKE_PRIOR_REVISION"*) exit 0 ;;
@@ -254,6 +258,17 @@ test("successful promotion prunes only expired Dialed image digests", (t) => {
     `image rm ${apiExpired}`,
     `image rm ${webExpired}`,
   ]);
+});
+
+test("tunnel startup failure prevents candidate state promotion", (t) => {
+  const value = fixture(t);
+  const before = readFileSync(value.activeState, "utf8");
+  const result = runReconcile(value, { FAKE_MODE: "tunnel-fail" });
+
+  assert.notEqual(result.status, 0);
+  assert.equal(readFileSync(value.activeState, "utf8"), before);
+  assert.equal(existsSync(value.rollbackState), false);
+  assert.doesNotMatch(dockerLog(value), /image rm /);
 });
 
 test("unhealthy candidate recreates only prior API and web digests", (t) => {

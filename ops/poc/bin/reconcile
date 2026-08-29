@@ -246,6 +246,8 @@ if ! wait_for_application "$candidate_revision"; then
   die "candidate health verification failed; no rollback target exists"
 fi
 
+compose up --no-deps -d cloudflared
+
 if [ "$has_prior" = "1" ]; then
   rollback_temporary=$(mktemp "$DIALED_STATE_DIR/.rollback.XXXXXX")
   cp "$DIALED_ACTIVE_STATE" "$rollback_temporary"
@@ -255,7 +257,6 @@ if [ "$has_prior" = "1" ]; then
 fi
 mv "$candidate_state" "$DIALED_ACTIVE_STATE"
 candidate_state=
-compose up --no-deps -d cloudflared
 prune_repository_images "$WEB_REPOSITORY" "$candidate_web" "$prior_web"
 prune_repository_images "$API_REPOSITORY" "$candidate_api" "$prior_api"
 trap - 0 1 2 15
