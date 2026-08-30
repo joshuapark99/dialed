@@ -41,6 +41,28 @@ loki.relabel "journal" {
     regex         = "(.+)"
   }
 
+  // Normalize every allowlisted source to a compact, fixed service label.
+  rule {
+    source_labels = ["__journal_container_name"]
+    regex         = "dialed-poc-(api|web|postgres|migrate|cloudflared)-1"
+    target_label  = "service"
+    replacement   = "$1"
+  }
+
+  rule {
+    source_labels = ["__journal_container_name"]
+    regex         = "dialed-observability-(grafana|loki|prometheus)-1"
+    target_label  = "service"
+    replacement   = "$1"
+  }
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    regex         = "dialed-poc-(deploy|backup|observe|storage-guard|alloy)\\.service"
+    target_label  = "service"
+    replacement   = "$1"
+  }
+
   rule {
     target_label = "environment"
     replacement  = "poc"
@@ -75,7 +97,7 @@ loki.process "journal" {
   // The local observability stack keeps warnings and errors while avoiding
   // routine self-noise. Application and operation logs are retained.
   stage.match {
-    selector            = "{service=~\"(grafana|loki|prometheus|alloy)\", level=~\"(info|debug)\"}"
+    selector            = "{service=~\"(grafana|loki|prometheus|alloy)\", level=~\"(20|30|debug|info)\"}"
     action              = "drop"
     drop_counter_reason = "drop_observability_info_debug"
   }

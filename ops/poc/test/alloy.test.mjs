@@ -8,8 +8,15 @@ function readConfig() {
   return readFileSync(configPath, "utf8");
 }
 
+function relabelRules(config) {
+  return [...config.matchAll(/  rule \{([\s\S]*?)\n  \}/g)].map(
+    (match) => match[1],
+  );
+}
+
 test("Alloy collects only allowlisted journal streams with low-cardinality labels", () => {
   const config = readConfig();
+  const rules = relabelRules(config);
 
   for (const component of [
     "loki.source.journal",
@@ -31,10 +38,31 @@ test("Alloy collects only allowlisted journal streams with low-cardinality label
   ]) {
     assert.match(config, new RegExp(label));
   }
-  assert.match(
-    config,
-    /source_labels = \["__journal_container_name"\]\s+target_label  = "service"\s+regex         = "\(\.\+\)"/,
-  );
+  for (const expectedRule of [
+    [
+      "__journal_container_name",
+      "dialed-poc-(api|web|postgres|migrate|cloudflared)-1",
+    ],
+    [
+      "__journal_container_name",
+      "dialed-observability-(grafana|loki|prometheus)-1",
+    ],
+    [
+      "__journal__systemd_unit",
+      "dialed-poc-(deploy|backup|observe|storage-guard|alloy)",
+    ],
+  ]) {
+    assert.ok(
+      rules.some(
+        (rule) =>
+          rule.includes('source_labels = ["' + expectedRule[0] + '"]') &&
+          rule.includes('regex         = "' + expectedRule[1]) &&
+          rule.includes('target_label  = "service"') &&
+          rule.includes('replacement   = "$1"'),
+      ),
+      "missing canonical service mapping for " + expectedRule[1],
+    );
+  }
   assert.match(
     config,
     /dialed-poc-\(api\|web\|postgres\|migrate\|cloudflared\)-1/,
@@ -67,7 +95,7 @@ test("Alloy collects only allowlisted journal streams with low-cardinality label
   );
   assert.ok(
     config.includes(
-      'selector            = "{service=~\\"(grafana|loki|prometheus|alloy)\\", level=~\\"(info|debug)\\"}"',
+      'selector            = "{service=~\\"(grafana|loki|prometheus|alloy)\\", level=~\\"(20|30|debug|info)\\"}"',
     ),
   );
   assert.match(config, /http:\/\/127\.0\.0\.1:3100\/loki\/api\/v1\/push/);
