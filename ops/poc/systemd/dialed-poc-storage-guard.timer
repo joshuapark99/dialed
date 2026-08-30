@@ -1,0 +1,12 @@
+[Unit]
+Description=Check Dialed POC observability storage capacity
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=dialed-poc-storage-guard.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

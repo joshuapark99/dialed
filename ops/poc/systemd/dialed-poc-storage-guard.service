@@ -1,0 +1,15 @@
+[Unit]
+Description=Stop Dialed POC telemetry before observability storage exhaustion
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/dialed/bin/storage-guard
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/dialed/observability
+TimeoutStartSec=30s

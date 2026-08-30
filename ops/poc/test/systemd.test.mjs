@@ -102,6 +102,35 @@ test("observability snapshots run as a constrained root one-shot every thirty se
   assert.equal(value(timer, "Timer", "Persistent"), "true");
 });
 
+test("storage ingestion guard runs as a constrained root one-shot every five minutes", () => {
+  const guard = parseUnit("dialed-poc-storage-guard.service");
+  const timer = parseUnit("dialed-poc-storage-guard.timer");
+
+  assert.equal(value(guard, "Service", "Type"), "oneshot");
+  assert.equal(value(guard, "Service", "User"), "root");
+  assert.equal(value(guard, "Service", "Group"), "root");
+  assert.equal(
+    value(guard, "Service", "ExecStart"),
+    "/opt/dialed/bin/storage-guard",
+  );
+  assert.equal(value(guard, "Service", "NoNewPrivileges"), "true");
+  assert.equal(value(guard, "Service", "PrivateTmp"), "true");
+  assert.equal(value(guard, "Service", "ProtectHome"), "true");
+  assert.equal(value(guard, "Service", "ProtectSystem"), "full");
+  assert.match(
+    value(guard, "Service", "ReadWritePaths"),
+    /\/var\/lib\/dialed\/observability/,
+  );
+  assert.equal(value(timer, "Timer", "OnBootSec"), "2min");
+  assert.equal(value(timer, "Timer", "OnUnitActiveSec"), "5min");
+  assert.equal(value(timer, "Timer", "AccuracySec"), "30s");
+  assert.equal(
+    value(timer, "Timer", "Unit"),
+    "dialed-poc-storage-guard.service",
+  );
+  assert.equal(value(timer, "Timer", "Persistent"), "true");
+});
+
 test("unit files contain no runtime credential values", () => {
   for (const name of [
     "dialed-poc-deploy.service",
