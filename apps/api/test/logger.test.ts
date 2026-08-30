@@ -27,6 +27,31 @@ const signedOut: AuthService = {
   },
 };
 
+test("logger-enabled servers avoid the deprecated request logging option", async () => {
+  const warnings: Error[] = [];
+  const captureWarning = (warning: Error) => warnings.push(warning);
+  process.on("warning", captureWarning);
+
+  try {
+    const app = createServer({
+      auth: signedOut,
+      store: new MemoryStore(),
+      logger: createProductionLoggerOptions("development"),
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    await app.close();
+  } finally {
+    process.off("warning", captureWarning);
+  }
+
+  assert.equal(
+    warnings.some(
+      (warning) => (warning as Error & { code?: string }).code === "FSTDEP023",
+    ),
+    false,
+  );
+});
+
 test("production logs normalize completed requests and redact secrets", async () => {
   const revision = "0123456789abcdef0123456789abcdef01234567";
   let serialized = "";

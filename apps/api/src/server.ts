@@ -1,4 +1,5 @@
 import Fastify, {
+  LogController,
   type FastifyInstance,
   type FastifyReply,
   type FastifyRequest,
@@ -94,7 +95,9 @@ export function createServer(
 ): FastifyInstance {
   const app = Fastify({
     logger: dependencies.logger ?? false,
-    disableRequestLogging: Boolean(dependencies.logger),
+    logController: new LogController({
+      disableRequestLogging: Boolean(dependencies.logger),
+    }),
   });
   const revision = dependencies.revision ?? "development";
 
