@@ -90,6 +90,51 @@ test("unit files contain no runtime credential values", () => {
   }
 });
 
+test("Alloy runs as a constrained loopback-only host collector", () => {
+  const alloy = parseUnit("dialed-poc-alloy.service");
+
+  assert.equal(
+    value(alloy, "Unit", "Requires"),
+    "dialed-poc-observability.service",
+  );
+  assert.match(
+    value(alloy, "Unit", "After"),
+    /dialed-poc-observability\.service/,
+  );
+  assert.equal(value(alloy, "Service", "User"), "alloy");
+  assert.equal(value(alloy, "Service", "Group"), "alloy");
+  assert.equal(
+    value(alloy, "Service", "SupplementaryGroups"),
+    "adm systemd-journal",
+  );
+  assert.equal(value(alloy, "Service", "MemoryMax"), "256M");
+  assert.equal(value(alloy, "Service", "CPUQuota"), "50%");
+  assert.equal(value(alloy, "Service", "Nice"), "5");
+  assert.equal(value(alloy, "Service", "Restart"), "on-failure");
+  assert.match(value(alloy, "Service", "ExecStart"), /\/usr\/bin\/alloy run/);
+  assert.match(value(alloy, "Service", "ExecStart"), /127\.0\.0\.1:12345/);
+  assert.match(
+    value(alloy, "Service", "ExecStart"),
+    /--storage\.path=\/var\/lib\/dialed\/observability\/alloy/,
+  );
+  assert.equal(value(alloy, "Service", "NoNewPrivileges"), "true");
+  assert.equal(value(alloy, "Service", "PrivateTmp"), "true");
+  assert.equal(value(alloy, "Service", "ProtectHome"), "true");
+  assert.equal(value(alloy, "Service", "ProtectSystem"), "strict");
+  assert.match(
+    value(alloy, "Service", "ReadWritePaths"),
+    /\/var\/lib\/dialed\/observability\/alloy/,
+  );
+  assert.match(
+    value(alloy, "Service", "ReadOnlyPaths"),
+    /\/var\/lib\/dialed\/observability\/textfile/,
+  );
+  assert.doesNotMatch(
+    readUnit("dialed-poc-alloy.service"),
+    /docker\.sock|SupplementaryGroups=docker/,
+  );
+});
+
 test("installer preserves operator secrets and validates before enabling timers", () => {
   const source = readInstaller();
   const requireEnvironment = source.indexOf(

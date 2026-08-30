@@ -1,0 +1,173 @@
+// Host-native, bounded telemetry for the Dialed POC. Docker state is exported
+// separately through allowlisted textfile metrics; this process never accesses Docker.
+loki.relabel "journal" {
+  forward_to = []
+
+  // Keep only the POC containers and the fixed host-operation service units.
+  rule {
+    action = "keep"
+    source_labels = [
+      "__journal__systemd_unit",
+      "__journal_container_name",
+    ]
+    regex = "^(?:(?:dialed-poc-(deploy|backup|observe|storage-guard|alloy)\\.service);.*|.*;(?:dialed-poc-(api|web|postgres|migrate|cloudflared)-1|dialed-observability-(grafana|loki|prometheus)-1))$"
+  }
+
+  // Preserve journal provenance until the process stage trims labels to the
+  // stable, low-cardinality set below.
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+
+  rule {
+    source_labels = ["__journal_container_name"]
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+  }
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__journal_container_name"]
+    target_label  = "service"
+    regex         = "(.+)"
+  }
+
+  rule {
+    target_label = "environment"
+    replacement  = "poc"
+  }
+}
+
+loki.process "journal" {
+  forward_to = [loki.write.local.receiver]
+
+  stage.json {
+    expressions = {
+      level        = "level"
+      requestId    = "requestId"
+      method       = "method"
+      route        = "route"
+      statusCode   = "statusCode"
+      responseTime = "responseTime"
+      revision     = "revision"
+      msg          = "msg"
+    }
+  }
+
+  // Only these extracted Pino fields become labels. Request identifiers,
+  // routes, methods, status codes, timings, and message text remain log data.
+  stage.labels {
+    values = {
+      level    = ""
+      revision = ""
+    }
+  }
+
+  // The local observability stack keeps warnings and errors while avoiding
+  // routine self-noise. Application and operation logs are retained.
+  stage.match {
+    selector            = "{service=~\"(grafana|loki|prometheus|alloy)\", level=~\"(info|debug)\"}"
+    action              = "drop"
+    drop_counter_reason = "drop_observability_info_debug"
+  }
+
+  // Never retain transient journald or request-derived labels in Loki.
+  stage.label_keep {
+    values = ["level", "service", "environment", "revision"]
+  }
+}
+
+loki.source.journal "host" {
+  forward_to     = [loki.process.journal.receiver]
+  format_as_json = false
+  relabel_rules  = loki.relabel.journal.rules
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://127.0.0.1:3100/loki/api/v1/push"
+  }
+}
+
+prometheus.exporter.unix "host" {
+  include_exporter_metrics = true
+  set_collectors = [
+    "cpu",
+    "cpufreq",
+    "diskstats",
+    "filesystem",
+    "hwmon",
+    "loadavg",
+    "meminfo",
+    "netclass",
+    "netdev",
+    "pressure",
+    "stat",
+    "thermal_zone",
+    "time",
+    "timex",
+    "textfile",
+  ]
+
+  filesystem {
+    fs_types_exclude     = "^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$"
+    mount_points_exclude = "^/(dev|proc|run/credentials/.+|sys|var/lib/docker/overlay2/.+|var/lib/containerd/.+)($|/)"
+  }
+
+  netclass {
+    ignored_devices = "^veth.*"
+  }
+
+  netdev {
+    device_exclude = "^veth.*"
+  }
+
+  textfile {
+    directory = "/var/lib/dialed/observability/textfile"
+  }
+}
+
+prometheus.exporter.self "alloy" {}
+
+prometheus.relabel "environment" {
+  forward_to = [prometheus.remote_write.local.receiver]
+
+  rule {
+    target_label = "environment"
+    replacement  = "poc"
+  }
+}
+
+prometheus.scrape "host" {
+  targets         = prometheus.exporter.unix.host.targets
+  forward_to      = [prometheus.relabel.environment.receiver]
+  scrape_interval = "30s"
+}
+
+prometheus.scrape "alloy" {
+  targets         = prometheus.exporter.self.alloy.targets
+  forward_to      = [prometheus.relabel.environment.receiver]
+  scrape_interval = "30s"
+}
+
+prometheus.remote_write "local" {
+  endpoint {
+    url = "http://127.0.0.1:9090/api/v1/write"
+
+    queue_config {
+      capacity             = 500
+      max_shards           = 1
+      min_shards           = 1
+      max_samples_per_send = 250
+    }
+  }
+}

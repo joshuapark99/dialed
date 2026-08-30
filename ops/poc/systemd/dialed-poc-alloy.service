@@ -1,0 +1,25 @@
+[Unit]
+Description=Collect Dialed POC host metrics and journal logs
+Requires=dialed-poc-observability.service
+After=dialed-poc-observability.service
+
+[Service]
+Type=simple
+User=alloy
+Group=alloy
+SupplementaryGroups=adm systemd-journal
+ExecStart=/usr/bin/alloy run --server.http.listen-addr=127.0.0.1:12345 --storage.path=/var/lib/dialed/observability/alloy /etc/alloy/config.alloy
+Restart=on-failure
+RestartSec=5s
+MemoryMax=256M
+CPUQuota=50%
+Nice=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/dialed/observability/alloy
+ReadOnlyPaths=/etc/alloy/config.alloy /var/lib/dialed/observability/textfile /var/log/journal /run/log/journal
+
+[Install]
+WantedBy=multi-user.target
