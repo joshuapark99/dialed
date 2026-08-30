@@ -96,7 +96,10 @@ test("dashboard remains a locked, bounded, no-alert overview", () => {
   }
 
   for (const query of [...requiredPrometheusQueries, ...requiredLokiQueries]) {
-    assert.ok(queries.includes(query), query);
+    assert.ok(
+      queries.some((candidate) => candidate.includes(query)),
+      query,
+    );
   }
 
   const variables = Object.fromEntries(
@@ -111,6 +114,42 @@ test("dashboard remains a locked, bounded, no-alert overview", () => {
     assert.equal(variable.type, "custom");
     assert.equal(variable.includeAll, false);
     assert.equal(variable.multi, false);
+  }
+});
+
+test("operation panels isolate timestamps and color failed results red", () => {
+  const dashboard = JSON.parse(readFileSync(dashboardPath, "utf8"));
+
+  for (const operation of ["deployment", "backup"]) {
+    const panel = dashboard.panels.find(
+      ({ title }) => title === `Last ${operation}`,
+    );
+    const resultTarget = panel.targets.find(({ refId }) => refId === "B");
+    const resultOverride = panel.fieldConfig.overrides.find(
+      ({ matcher }) => matcher.id === "byFrameRefID" && matcher.options === "B",
+    );
+
+    assert.equal(
+      panel.targets.find(({ refId }) => refId === "A").expr,
+      `dialed_operation_last_timestamp_seconds{operation="${operation}"}`,
+    );
+    assert.equal(panel.fieldConfig.defaults.thresholds, undefined);
+    assert.ok(resultTarget, `${operation} result target`);
+    assert.equal(
+      resultTarget.expr,
+      `dialed_operation_last_result{operation="${operation}"}`,
+    );
+    assert.ok(resultOverride, `${operation} result color override`);
+    const thresholds = resultOverride.properties.find(
+      ({ id }) => id === "thresholds",
+    ).value;
+    assert.deepEqual(thresholds, {
+      mode: "absolute",
+      steps: [
+        { color: "green", value: null },
+        { color: "red", value: 1 },
+      ],
+    });
   }
 });
 

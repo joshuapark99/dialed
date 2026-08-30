@@ -116,16 +116,26 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
-            ]
-          },
           "unit": "dateTimeAsIso"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "red", "value": 1 }
+                  ]
+                }
+              },
+              { "id": "unit", "value": "none" }
+            ]
+          }
+        ]
       },
       "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
       "options": {
@@ -141,7 +151,14 @@
         "textMode": "auto"
       },
       "targets": [
-        { "expr": "dialed_operation_last_timestamp_seconds", "refId": "A" }
+        {
+          "expr": "dialed_operation_last_timestamp_seconds{operation=\"deployment\"}",
+          "refId": "A"
+        },
+        {
+          "expr": "dialed_operation_last_result{operation=\"deployment\"}",
+          "refId": "B"
+        }
       ],
       "title": "Last deployment",
       "type": "stat"
@@ -151,16 +168,26 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
-            ]
-          },
           "unit": "dateTimeAsIso"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "red", "value": 1 }
+                  ]
+                }
+              },
+              { "id": "unit", "value": "none" }
+            ]
+          }
+        ]
       },
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 4 },
       "options": {
@@ -176,7 +203,14 @@
         "textMode": "auto"
       },
       "targets": [
-        { "expr": "dialed_operation_last_timestamp_seconds", "refId": "A" }
+        {
+          "expr": "dialed_operation_last_timestamp_seconds{operation=\"backup\"}",
+          "refId": "A"
+        },
+        {
+          "expr": "dialed_operation_last_result{operation=\"backup\"}",
+          "refId": "B"
+        }
       ],
       "title": "Last backup",
       "type": "stat"
