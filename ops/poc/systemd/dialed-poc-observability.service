@@ -1,0 +1,20 @@
+[Unit]
+Description=Run the local Dialed POC observability stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/dialed/bin/observability start
+ExecStop=/opt/dialed/bin/observability stop
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+TimeoutStartSec=5min
+
+[Install]
+WantedBy=multi-user.target

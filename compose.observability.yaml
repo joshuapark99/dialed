@@ -22,11 +22,11 @@ services:
         source: ${DIALED_OBSERVABILITY_DIR:?DIALED_OBSERVABILITY_DIR is required}/grafana
         target: /var/lib/grafana
       - type: bind
-        source: ./ops/poc/observability/grafana/provisioning
+        source: ${DIALED_OBSERVABILITY_CONFIG_DIR:-./ops/poc/observability}/grafana/provisioning
         target: /etc/grafana/provisioning
         read_only: true
       - type: bind
-        source: ./ops/poc/observability/grafana/dashboards
+        source: ${DIALED_OBSERVABILITY_CONFIG_DIR:-./ops/poc/observability}/grafana/dashboards
         target: /var/lib/grafana/dashboards
         read_only: true
     networks:
@@ -47,7 +47,7 @@ services:
       - "127.0.0.1:3100:3100"
     volumes:
       - type: bind
-        source: ./ops/poc/observability/loki.yaml
+        source: ${DIALED_OBSERVABILITY_CONFIG_DIR:-./ops/poc/observability}/loki.yaml
         target: /etc/loki/config.yaml
         read_only: true
       - type: bind
@@ -73,7 +73,7 @@ services:
       - "127.0.0.1:9090:9090"
     volumes:
       - type: bind
-        source: ./ops/poc/observability/prometheus.yaml
+        source: ${DIALED_OBSERVABILITY_CONFIG_DIR:-./ops/poc/observability}/prometheus.yaml
         target: /etc/prometheus/prometheus.yml
         read_only: true
       - type: bind

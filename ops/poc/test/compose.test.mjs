@@ -37,6 +37,16 @@ test(
         JSON.stringify(service.volumes ?? []).includes("docker.sock"),
         false,
       );
+      assert.equal(service.logging.driver, "journald");
+      assert.equal(service.logging.options["tag"], "dialed-poc/{{.Name}}");
+      assert.equal(
+        service.logging.options["labels"],
+        "com.docker.compose.service,io.dialed.revision",
+      );
+      assert.equal(
+        service.labels["io.dialed.revision"],
+        "0123456789abcdef0123456789abcdef01234567",
+      );
     }
 
     assert.deepEqual(model.services.postgres.networks, { app: null });

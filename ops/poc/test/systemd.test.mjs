@@ -191,6 +191,23 @@ test("Alloy runs as a constrained loopback-only host collector", () => {
   );
 });
 
+test("observability lifecycle is a Docker-ordered persistent one-shot", () => {
+  const observability = parseUnit("dialed-poc-observability.service");
+
+  assert.equal(value(observability, "Service", "Type"), "oneshot");
+  assert.equal(value(observability, "Service", "RemainAfterExit"), "yes");
+  assert.equal(
+    value(observability, "Service", "ExecStart"),
+    "/opt/dialed/bin/observability start",
+  );
+  assert.equal(
+    value(observability, "Service", "ExecStop"),
+    "/opt/dialed/bin/observability stop",
+  );
+  assert.match(value(observability, "Unit", "After"), /docker\.service/);
+  assert.match(value(observability, "Unit", "After"), /network-online\.target/);
+});
+
 test("installer preserves operator secrets and validates before enabling timers", () => {
   const source = readInstaller();
   const requireEnvironment = source.indexOf(
@@ -210,10 +227,71 @@ test("installer preserves operator secrets and validates before enabling timers"
   );
 });
 
+test("installer provisions the complete observability stack before dependency-ordered units", () => {
+  const source = readInstaller();
+  const validateCompose = source.indexOf("compose.observability.yaml");
+  const validateAlloy = source.indexOf("alloy validate");
+  const validateLoki = source.indexOf("-verify-config=true");
+  const validatePrometheus = source.indexOf("promtool");
+  const enableObservability = source.indexOf(
+    "dialed-poc-observability.service",
+  );
+  const enableObserve = source.indexOf("dialed-poc-observe.timer");
+  const enableGuard = source.indexOf("dialed-poc-storage-guard.timer");
+  const enableAlloy = source.indexOf("dialed-poc-alloy.service");
+  const enableDeploy = source.indexOf("dialed-poc-deploy.timer");
+  const enableBackup = source.indexOf("dialed-poc-backup.timer");
+
+  assert.match(source, /require_command curl/);
+  assert.match(source, /alloy --version/);
+  assert.match(source, /1\.19\.0/);
+  assert.match(source, /DIALED_OBSERVABILITY_DIR/);
+  assert.match(source, /GRAFANA_ADMIN_USER/);
+  assert.match(source, /GRAFANA_ADMIN_PASSWORD/);
+  assert.match(source, /DIALED_OBSERVABILITY_MAX_BYTES/);
+  assert.match(source, /DIALED_OBSERVABILITY_MIN_FREE_BYTES/);
+  assert.match(source, /observability_path/);
+  assert.match(source, /grafana.*472 472 0700/s);
+  assert.match(source, /loki.*10001 10001 0700/s);
+  assert.match(source, /prometheus.*65534 65534 0700/s);
+  assert.match(source, /textfile.*root alloy 0750/s);
+  assert.match(source, /operations.*root root 0700/s);
+  assert.match(source, /90-dialed-poc\.conf/);
+  assert.ok(validateCompose >= 0);
+  assert.ok(validateAlloy > validateCompose);
+  assert.ok(validateLoki > validateAlloy);
+  assert.ok(validatePrometheus > validateLoki);
+  assert.ok(enableObservability > validatePrometheus);
+  assert.ok(enableObserve > enableObservability);
+  assert.ok(enableGuard > enableObserve);
+  assert.ok(enableAlloy > enableGuard);
+  assert.ok(enableDeploy > enableAlloy);
+  assert.ok(enableBackup > enableDeploy);
+  assert.doesNotMatch(source, /chown\s+-R|chown\s+--recursive/);
+});
+
+test("installer ships every observability operation and its service or timer", () => {
+  const source = readInstaller();
+
+  for (const executable of ["observe", "record-operation", "storage-guard"]) {
+    assert.match(source, new RegExp(`\\b${executable}\\b`));
+  }
+  assert.match(source, /"\/opt\/dialed\/bin\/\$executable"/);
+  for (const unit of [
+    "dialed-poc-observe.service",
+    "dialed-poc-observe.timer",
+    "dialed-poc-storage-guard.service",
+    "dialed-poc-storage-guard.timer",
+  ]) {
+    assert.match(source, new RegExp(`\\b${unit.replace(".", "\\.")}\\b`));
+  }
+  assert.match(source, /"\/etc\/systemd\/system\/\$\(basename "\$unit"\)"/);
+});
+
 test("installer validates dedicated storage without chmodding existing paths", () => {
   const source = readInstaller();
   assert.match(source, /require_dedicated_storage_path/);
-  assert.match(source, /ensure_root_directory/);
+  assert.match(source, /ensure_component_directory/);
   assert.match(source, /must be a dedicated nested path/);
   assert.match(source, /must be separate dedicated directories/);
   assert.doesNotMatch(

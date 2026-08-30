@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=common
+. "$SCRIPT_DIR/common"
+
+[ "$#" -eq 1 ] || die "usage: observability {start|stop|status|logs|config}"
+command=$1
+case "$command" in
+  start | stop | status | logs | config) ;;
+  *) die "usage: observability {start|stop|status|logs|config}" ;;
+esac
+
+load_poc_env
+require_value DIALED_OBSERVABILITY_DIR "${DIALED_OBSERVABILITY_DIR:-}"
+require_value GRAFANA_ADMIN_USER "${GRAFANA_ADMIN_USER:-}"
+require_value GRAFANA_ADMIN_PASSWORD "${GRAFANA_ADMIN_PASSWORD:-}"
+
+DIALED_OBSERVABILITY_COMPOSE_FILE=${DIALED_OBSERVABILITY_COMPOSE_FILE:-/opt/dialed/compose.observability.yaml}
+DIALED_OBSERVABILITY_CONFIG_DIR=${DIALED_OBSERVABILITY_CONFIG_DIR:-/opt/dialed/observability}
+require_absolute_path DIALED_OBSERVABILITY_COMPOSE_FILE "$DIALED_OBSERVABILITY_COMPOSE_FILE"
+require_absolute_path DIALED_OBSERVABILITY_CONFIG_DIR "$DIALED_OBSERVABILITY_CONFIG_DIR"
+validate_owned_file "$DIALED_OBSERVABILITY_COMPOSE_FILE"
+export DIALED_OBSERVABILITY_CONFIG_DIR
+
+case "$command" in
+  start) exec docker compose --env-file "$DIALED_ENV_FILE" -f "$DIALED_OBSERVABILITY_COMPOSE_FILE" up -d ;;
+  stop) exec docker compose --env-file "$DIALED_ENV_FILE" -f "$DIALED_OBSERVABILITY_COMPOSE_FILE" down ;;
+  status) exec docker compose --env-file "$DIALED_ENV_FILE" -f "$DIALED_OBSERVABILITY_COMPOSE_FILE" ps ;;
+  logs) exec docker compose --env-file "$DIALED_ENV_FILE" -f "$DIALED_OBSERVABILITY_COMPOSE_FILE" logs --tail 200 ;;
+  config) exec docker compose --env-file "$DIALED_ENV_FILE" -f "$DIALED_OBSERVABILITY_COMPOSE_FILE" config ;;
+esac

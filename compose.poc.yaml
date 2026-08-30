@@ -22,6 +22,13 @@ services:
       start_period: 20s
     security_opt:
       - no-new-privileges:true
+    labels:
+      io.dialed.revision: ${APP_REVISION:?APP_REVISION is required}
+    logging:
+      driver: journald
+      options:
+        tag: "dialed-poc/{{.Name}}"
+        labels: "com.docker.compose.service,io.dialed.revision"
 
   migrate:
     image: ${API_IMAGE:?API_IMAGE is required}
@@ -42,6 +49,13 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    labels:
+      io.dialed.revision: ${APP_REVISION:?APP_REVISION is required}
+    logging:
+      driver: journald
+      options:
+        tag: "dialed-poc/{{.Name}}"
+        labels: "com.docker.compose.service,io.dialed.revision"
 
   api:
     image: ${API_IMAGE:?API_IMAGE is required}
@@ -71,6 +85,13 @@ services:
     security_opt:
       - no-new-privileges:true
     stop_grace_period: 20s
+    labels:
+      io.dialed.revision: ${APP_REVISION:?APP_REVISION is required}
+    logging:
+      driver: journald
+      options:
+        tag: "dialed-poc/{{.Name}}"
+        labels: "com.docker.compose.service,io.dialed.revision"
 
   web:
     image: ${WEB_IMAGE:?WEB_IMAGE is required}
@@ -96,6 +117,13 @@ services:
     security_opt:
       - no-new-privileges:true
     stop_grace_period: 20s
+    labels:
+      io.dialed.revision: ${APP_REVISION:?APP_REVISION is required}
+    logging:
+      driver: journald
+      options:
+        tag: "dialed-poc/{{.Name}}"
+        labels: "com.docker.compose.service,io.dialed.revision"
 
   cloudflared:
     image: cloudflare/cloudflared:2026.8.2
@@ -117,6 +145,13 @@ services:
     security_opt:
       - no-new-privileges:true
     stop_grace_period: 20s
+    labels:
+      io.dialed.revision: ${APP_REVISION:?APP_REVISION is required}
+    logging:
+      driver: journald
+      options:
+        tag: "dialed-poc/{{.Name}}"
+        labels: "com.docker.compose.service,io.dialed.revision"
 
 networks:
   app:

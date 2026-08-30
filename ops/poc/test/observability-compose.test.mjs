@@ -117,3 +117,16 @@ test("storage configurations retain data within the required bounds", () => {
   assert.match(prometheus, /^\s*time:\s*30d\s*$/m);
   assert.match(prometheus, /^\s*size:\s*1GB\s*$/m);
 });
+
+test("observability lifecycle has a narrow, separate Compose interface", () => {
+  const lifecycle = readFileSync("ops/poc/bin/observability", "utf8");
+
+  assert.match(lifecycle, /case "\$command" in/);
+  assert.match(lifecycle, /start \| stop \| status \| logs \| config/);
+  assert.match(lifecycle, /\*\) die "usage: observability/);
+  assert.match(lifecycle, /\/opt\/dialed\/compose\.observability\.yaml/);
+  assert.match(
+    lifecycle,
+    /docker compose --env-file "\$DIALED_ENV_FILE" -f "\$DIALED_OBSERVABILITY_COMPOSE_FILE"/,
+  );
+});

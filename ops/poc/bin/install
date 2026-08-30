@@ -25,6 +25,16 @@ require_compose_version() {
   fi
 }
 
+require_positive_decimal() {
+  setting_name=$1
+  setting_value=$2
+  case "$setting_value" in
+    '' | *[!0-9]*) die "$setting_name must be a positive decimal integer" ;;
+  esac
+  [ "$setting_value" -gt 0 ] 2>/dev/null ||
+    die "$setting_name must be a positive decimal integer"
+}
+
 require_dedicated_storage_path() {
   storage_name=$1
   storage_path=$2
@@ -35,19 +45,70 @@ require_dedicated_storage_path() {
   esac
 }
 
-ensure_root_directory() {
+require_disjoint_paths() {
+  left_name=$1
+  left_path=$2
+  right_name=$3
+  right_path=$4
+  case "$right_path" in
+    "$left_path" | "$left_path"/*)
+      die "$left_name and $right_name must be separate dedicated directories"
+      ;;
+  esac
+  case "$left_path" in
+    "$right_path" | "$right_path"/*)
+      die "$left_name and $right_name must be separate dedicated directories"
+      ;;
+  esac
+}
+
+numeric_id() {
+  requested_id=$1
+  case "$requested_id" in
+    *[!0-9]*) id -u "$requested_id" ;;
+    *) printf '%s\n' "$requested_id" ;;
+  esac
+}
+
+numeric_group_id() {
+  requested_group=$1
+  case "$requested_group" in
+    *[!0-9]*) getent group "$requested_group" | cut -d: -f3 ;;
+    *) printf '%s\n' "$requested_group" ;;
+  esac
+}
+
+ensure_component_directory() {
   directory_name=$1
   directory_path=$2
+  directory_owner=$3
+  directory_group=$4
+  directory_mode=$5
+  expected_owner=$(numeric_id "$directory_owner")
+  expected_group=$(numeric_group_id "$directory_group")
+  [ -n "$expected_group" ] || die "could not resolve group $directory_group"
+
   if [ -e "$directory_path" ]; then
     [ -d "$directory_path" ] || die "$directory_path must be a directory"
     [ ! -L "$directory_path" ] || die "$directory_path must not be a symbolic link"
-    [ "$(stat -c '%u' "$directory_path")" = "0" ] ||
-      die "$directory_path must be owned by root"
-    [ -z "$(find "$directory_path" -prune -perm /077 -print)" ] ||
-      die "$directory_name must be mode 0700"
+    [ "$(stat -c '%u:%g' "$directory_path")" = "$expected_owner:$expected_group" ] ||
+      die "$directory_name must have owner $directory_owner:$directory_group"
+    [ "$(stat -c '%a' "$directory_path")" = "${directory_mode#0}" ] ||
+      die "$directory_name must be mode $directory_mode"
   else
-    install -d -o root -g root -m 0700 "$directory_path"
+    install -d -o "$directory_owner" -g "$directory_group" -m "$directory_mode" "$directory_path"
   fi
+}
+
+install_configuration_tree() {
+  source_root=$1
+  destination_root=$2
+  find "$source_root" -type f -print |
+    while IFS= read -r source_file; do
+      relative_file=${source_file#"$source_root"/}
+      install -D -o root -g root -m 0644 \
+        "$source_file" "$destination_root/$relative_file"
+    done
 }
 
 [ "$(id -u)" = "0" ] || die "run this installer as root"
@@ -56,14 +117,21 @@ case "$(uname -m)" in
   *) die "the POC host must run a 64-bit ARM OS (aarch64)" ;;
 esac
 
+require_command curl
 require_command docker
+require_command getent
 require_command install
 require_command realpath
 require_command systemctl
+[ -x /usr/bin/alloy ] || die "/usr/bin/alloy is required"
+alloy_version=$(/usr/bin/alloy --version 2>&1)
+printf '%s\n' "$alloy_version" | grep -Eq '(^|[^0-9])v?1\.19\.0([^0-9]|$)' ||
+  die "Grafana Alloy 1.19.0 is required; found $alloy_version"
 require_compose_version
 docker info >/dev/null 2>&1 || die "the Docker daemon is not available"
 
 install -d -o root -g root -m 0700 /etc/dialed /var/lib/dialed
+install -d -o root -g root -m 0755 /opt/dialed /opt/dialed/bin
 install -o root -g root -m 0600 \
   "$POC_ROOT/poc.env.example" \
   /etc/dialed/poc.env.example
@@ -85,7 +153,12 @@ for required_name in \
   POSTGRES_DB \
   TUNNEL_TOKEN \
   DIALED_DATA_DIR \
-  DIALED_BACKUP_DIR; do
+  DIALED_BACKUP_DIR \
+  DIALED_OBSERVABILITY_DIR \
+  GRAFANA_ADMIN_USER \
+  GRAFANA_ADMIN_PASSWORD \
+  DIALED_OBSERVABILITY_MAX_BYTES \
+  DIALED_OBSERVABILITY_MIN_FREE_BYTES; do
   eval "required_value=\${$required_name:-}"
   require_value "$required_name" "$required_value"
 done
@@ -97,38 +170,98 @@ printf '%s\n' "$APP_URL" |
   die "BETTER_AUTH_SECRET must contain at least 32 characters"
 printf '%s\n' "$POSTGRES_PASSWORD" | grep -Eq '^[A-Za-z0-9._~-]+$' ||
   die "POSTGRES_PASSWORD must use only URL-safe unreserved characters"
+printf '%s' "$GRAFANA_ADMIN_USER" | grep -Eq '^[^[:space:][:cntrl:]]+$' ||
+  die "GRAFANA_ADMIN_USER must not contain whitespace or control characters"
+[ "${#GRAFANA_ADMIN_PASSWORD}" -ge 32 ] ||
+  die "GRAFANA_ADMIN_PASSWORD must contain at least 32 characters"
+require_positive_decimal DIALED_OBSERVABILITY_MAX_BYTES "$DIALED_OBSERVABILITY_MAX_BYTES"
+require_positive_decimal DIALED_OBSERVABILITY_MIN_FREE_BYTES "$DIALED_OBSERVABILITY_MIN_FREE_BYTES"
 
-require_absolute_path "DIALED_DATA_DIR" "$DIALED_DATA_DIR"
-require_absolute_path "DIALED_BACKUP_DIR" "$DIALED_BACKUP_DIR"
+require_absolute_path DIALED_DATA_DIR "$DIALED_DATA_DIR"
+require_absolute_path DIALED_BACKUP_DIR "$DIALED_BACKUP_DIR"
+require_absolute_path DIALED_OBSERVABILITY_DIR "$DIALED_OBSERVABILITY_DIR"
 data_path=$(realpath -m -- "$DIALED_DATA_DIR")
 postgres_path=$data_path/postgres
 backup_path=$(realpath -m -- "$DIALED_BACKUP_DIR")
-require_dedicated_storage_path "DIALED_DATA_DIR" "$data_path"
-require_dedicated_storage_path "DIALED_BACKUP_DIR" "$backup_path"
-case "$backup_path" in
-  "$data_path" | "$data_path"/*)
-    die "DIALED_DATA_DIR and DIALED_BACKUP_DIR must be separate dedicated directories"
-    ;;
-esac
-case "$data_path" in
-  "$backup_path" | "$backup_path"/*)
-    die "DIALED_DATA_DIR and DIALED_BACKUP_DIR must be separate dedicated directories"
-    ;;
-esac
+observability_path=$(realpath -m -- "$DIALED_OBSERVABILITY_DIR")
+require_dedicated_storage_path DIALED_DATA_DIR "$data_path"
+require_dedicated_storage_path DIALED_BACKUP_DIR "$backup_path"
+require_dedicated_storage_path DIALED_OBSERVABILITY_DIR "$observability_path"
+require_disjoint_paths DIALED_DATA_DIR "$data_path" DIALED_BACKUP_DIR "$backup_path"
+require_disjoint_paths DIALED_DATA_DIR "$data_path" DIALED_OBSERVABILITY_DIR "$observability_path"
+require_disjoint_paths DIALED_BACKUP_DIR "$backup_path" DIALED_OBSERVABILITY_DIR "$observability_path"
 
-ensure_root_directory "DIALED_DATA_DIR" "$data_path"
-ensure_root_directory "DIALED_BACKUP_DIR" "$backup_path"
+ensure_component_directory DIALED_DATA_DIR "$data_path" root root 0700
+ensure_component_directory DIALED_BACKUP_DIR "$backup_path" root root 0700
+ensure_component_directory DIALED_OBSERVABILITY_DIR "$observability_path" root root 0700
 if [ -e "$postgres_path" ]; then
   [ -d "$postgres_path" ] || die "$postgres_path must be a directory"
   [ ! -L "$postgres_path" ] || die "$postgres_path must not be a symbolic link"
 else
   install -d -o root -g root -m 0700 "$postgres_path"
 fi
-install -d -o root -g root -m 0755 /opt/dialed/bin
+ensure_component_directory grafana "$observability_path/grafana" 472 472 0700
+ensure_component_directory loki "$observability_path/loki" 10001 10001 0700
+ensure_component_directory prometheus "$observability_path/prometheus" 65534 65534 0700
+ensure_component_directory alloy "$observability_path/alloy" alloy alloy 0700
+ensure_component_directory textfile "$observability_path/textfile" root alloy 0750
+ensure_component_directory operations "$observability_path/operations" root root 0700
+ensure_component_directory operations /var/lib/dialed/operations root root 0700
+
+stage_directory=$(mktemp -d /opt/dialed/.observability-stage.XXXXXX)
+cleanup_stage() {
+  rm -rf -- "$stage_directory"
+}
+trap cleanup_stage 0 1 2 15
 install -o root -g root -m 0644 \
   "$REPOSITORY_ROOT/compose.poc.yaml" \
+  "$stage_directory/compose.poc.yaml"
+install -o root -g root -m 0644 \
+  "$REPOSITORY_ROOT/compose.observability.yaml" \
+  "$stage_directory/compose.observability.yaml"
+install_configuration_tree "$POC_ROOT/observability" "$stage_directory/observability"
+
+# Pulling these pinned host assets belongs to installation, never reconciliation.
+docker pull grafana/grafana:13.1.3
+docker pull grafana/loki:3.7.6
+docker pull prom/prometheus:v3.13.2
+
+zero_revision=0000000000000000000000000000000000000000
+zero_digest=0000000000000000000000000000000000000000000000000000000000
+WEB_IMAGE="ghcr.io/joshuapark99/dialed-web@sha256:$zero_digest"
+API_IMAGE="ghcr.io/joshuapark99/dialed-api@sha256:$zero_digest"
+APP_REVISION=$zero_revision
+DIALED_OBSERVABILITY_CONFIG_DIR=$stage_directory/observability
+export WEB_IMAGE API_IMAGE APP_REVISION DIALED_OBSERVABILITY_CONFIG_DIR
+docker compose \
+  --env-file /etc/dialed/poc.env \
+  -f "$stage_directory/compose.poc.yaml" \
+  config --quiet
+docker compose \
+  --env-file /etc/dialed/poc.env \
+  -f "$stage_directory/compose.observability.yaml" \
+  config --quiet
+/usr/bin/alloy validate "$stage_directory/observability/alloy/config.alloy"
+docker run --rm \
+  -v "$stage_directory/observability/loki.yaml:/etc/loki/config.yaml:ro" \
+  grafana/loki:3.7.6 \
+  -verify-config=true \
+  -config.file=/etc/loki/config.yaml
+docker run --rm \
+  --entrypoint promtool \
+  -v "$stage_directory/observability/prometheus.yaml:/etc/prometheus/prometheus.yml:ro" \
+  prom/prometheus:v3.13.2 \
+  check config /etc/prometheus/prometheus.yml
+
+install -o root -g root -m 0644 \
+  "$stage_directory/compose.poc.yaml" \
   /opt/dialed/compose.poc.yaml
-for executable in common backup reconcile check-external.mjs; do
+install -o root -g root -m 0644 \
+  "$stage_directory/compose.observability.yaml" \
+  /opt/dialed/compose.observability.yaml
+install_configuration_tree "$stage_directory/observability" /opt/dialed/observability
+for executable in \
+  common backup reconcile check-external.mjs observe record-operation storage-guard observability; do
   install -o root -g root -m 0755 \
     "$POC_ROOT/bin/$executable" \
     "/opt/dialed/bin/$executable"
@@ -138,25 +271,41 @@ for library in "$POC_ROOT"/lib/*.mjs; do
     "$library" \
     "/opt/dialed/lib/$(basename "$library")"
 done
-for unit in "$POC_ROOT"/systemd/*; do
+for unit in \
+  dialed-poc-observability.service \
+  dialed-poc-observe.service \
+  dialed-poc-observe.timer \
+  dialed-poc-storage-guard.service \
+  dialed-poc-storage-guard.timer \
+  dialed-poc-alloy.service \
+  dialed-poc-deploy.service \
+  dialed-poc-deploy.timer \
+  dialed-poc-backup.service \
+  dialed-poc-backup.timer; do
   install -o root -g root -m 0644 \
-    "$unit" \
+    "$POC_ROOT/systemd/$unit" \
     "/etc/systemd/system/$(basename "$unit")"
 done
 
-zero_revision=0000000000000000000000000000000000000000
-zero_digest=0000000000000000000000000000000000000000000000000000000000000000
-WEB_IMAGE="ghcr.io/joshuapark99/dialed-web@sha256:$zero_digest"
-API_IMAGE="ghcr.io/joshuapark99/dialed-api@sha256:$zero_digest"
-APP_REVISION=$zero_revision
-export WEB_IMAGE API_IMAGE APP_REVISION
-docker compose \
-  --env-file /etc/dialed/poc.env \
-  -f /opt/dialed/compose.poc.yaml \
-  config --quiet
+install -d -o root -g root -m 0755 /etc/systemd/journald.conf.d
+journald_stage=$(mktemp /etc/systemd/journald.conf.d/.90-dialed-poc.conf.XXXXXX)
+install -o root -g root -m 0644 \
+  "$POC_ROOT/observability/journald/90-dialed-poc.conf" \
+  "$journald_stage"
+mv -f "$journald_stage" /etc/systemd/journald.conf.d/90-dialed-poc.conf
+systemctl restart systemd-journald.service
 
 systemctl daemon-reload
-systemctl enable --now dialed-poc-deploy.timer dialed-poc-backup.timer
+if ! systemctl enable --now dialed-poc-observability.service; then
+  printf '%s\n' \
+    "Dialed POC application stack was left unchanged because observability startup failed." >&2
+  exit 1
+fi
+systemctl enable --now dialed-poc-observe.timer
+systemctl enable --now dialed-poc-storage-guard.timer
+systemctl enable --now dialed-poc-alloy.service
+systemctl enable --now dialed-poc-deploy.timer
+systemctl enable --now dialed-poc-backup.timer
 
 printf '%s\n' \
   "Dialed POC host assets installed." \
