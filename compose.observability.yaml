@@ -14,12 +14,21 @@ services:
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
       GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/dialed-poc-overview.json
     ports:
       - "127.0.0.1:3002:3000"
     volumes:
       - type: bind
         source: ${DIALED_OBSERVABILITY_DIR:?DIALED_OBSERVABILITY_DIR is required}/grafana
         target: /var/lib/grafana
+      - type: bind
+        source: ./ops/poc/observability/grafana/provisioning
+        target: /etc/grafana/provisioning
+        read_only: true
+      - type: bind
+        source: ./ops/poc/observability/grafana/dashboards
+        target: /var/lib/grafana/dashboards
+        read_only: true
     networks:
       observability: null
     mem_limit: 512m
