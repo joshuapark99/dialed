@@ -156,7 +156,7 @@
           "refId": "A"
         },
         {
-          "expr": "dialed_operation_last_result{operation=\"deployment\"}",
+          "expr": "dialed_operation_last_result{operation=\"deployment\",result=\"failed\"}",
           "refId": "B"
         }
       ],
@@ -208,7 +208,7 @@
           "refId": "A"
         },
         {
-          "expr": "dialed_operation_last_result{operation=\"backup\"}",
+          "expr": "dialed_operation_last_result{operation=\"backup\",result=\"failed\"}",
           "refId": "B"
         }
       ],

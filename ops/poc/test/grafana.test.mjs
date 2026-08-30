@@ -137,7 +137,7 @@ test("operation panels isolate timestamps and color failed results red", () => {
     assert.ok(resultTarget, `${operation} result target`);
     assert.equal(
       resultTarget.expr,
-      `dialed_operation_last_result{operation="${operation}"}`,
+      `dialed_operation_last_result{operation="${operation}",result="failed"}`,
     );
     assert.ok(resultOverride, `${operation} result color override`);
     const thresholds = resultOverride.properties.find(
