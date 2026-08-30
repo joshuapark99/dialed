@@ -81,6 +81,12 @@ Set real values for `BETTER_AUTH_SECRET`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT
 
 For the Raspberry Pi proof-of-concept stack, Cloudflare Access setup, pull-based CI/CD, backups, rollback, and teardown procedures, see [ops/poc/README.md](ops/poc/README.md). The POC Compose topology publishes no host ports and is separate from the local development stack.
 
+### POC access boundary
+
+Cloudflare Access is the entry gate for the private POC and invited testers. It controls who can reach the deployment before traffic reaches the Pi, but it does not create Dialed accounts or replace application authentication, data ownership, synchronization, or account recovery. While Google OAuth is disabled, invited testers use Dialed anonymously and their data remains local to each browser and device.
+
+For a broader public release, retain Cloudflare Tunnel, TLS, and edge protection, remove the Access gate from the public application hostname, and use Dialed authentication for user identity and any application-level invitation flow. Cloudflare Access can remain on staging, administrative, and operational endpoints.
+
 ## Delivery notes
 
 Implementation status and future work are tracked in [docs/implementation-tickets.md](docs/implementation-tickets.md). Pour-over, Bluetooth scales, public links, collaboration, and native clients are intentionally deferred.

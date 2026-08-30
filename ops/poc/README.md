@@ -76,6 +76,12 @@ Create one Access self-hosted application for the POC hostname with a 24-hour se
 
 Requests that match neither policy must be denied. Store the service token ID and secret only in the GitHub environment described below. Cloudflare Access protects the origin but does not replace Dialed's own Google login for cloud sync.
 
+### Access lifecycle
+
+Cloudflare Access is used here as a private-POC and closed-beta gate, not as Dialed's final user-account system. Access decides who may reach the hostname; Dialed authentication owns application identity, account-scoped data, synchronization, and account recovery. If Google OAuth is not configured, an Access-approved tester still uses Dialed anonymously and their data remains local to that browser and device.
+
+Requiring both Access authentication and Dialed login is acceptable for a small invited test group, but adds unnecessary friction for a public consumer release. For a broader launch, keep the named Cloudflare Tunnel, TLS, and edge protections while removing Access from the public application hostname and relying on Dialed authentication and any application-level invitation flow. Continue to use Access for non-public staging, administrative, and operational endpoints.
+
 ## 4. Configure Google OAuth
 
 Set the authorized redirect URI in the Google OAuth client to exactly:
