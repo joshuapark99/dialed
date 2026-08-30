@@ -11,6 +11,21 @@ case "$reason" in
   *) die "backup reason must be scheduled or predeploy" ;;
 esac
 
+zero_revision=0000000000000000000000000000000000000000
+operation_revision=$zero_revision
+temporary=
+record_exit() {
+  operation_status=$?
+  trap - 0 1 2 15
+  [ -z "$temporary" ] || rm -f -- "$temporary"
+  operation_result=failure
+  [ "$operation_status" -eq 0 ] && operation_result=success
+  "${DIALED_RECORD_OPERATION:-$SCRIPT_DIR/record-operation}" \
+    backup "$operation_result" "$operation_revision" "$reason" || true
+  exit "$operation_status"
+}
+trap record_exit 0 1 2 15
+
 umask 077
 acquire_lock
 load_poc_env
@@ -26,6 +41,7 @@ case "$APP_REVISION" in
     die "APP_REVISION must be a lowercase 40-character Git revision"
     ;;
 esac
+operation_revision=$APP_REVISION
 
 mkdir -p "$DIALED_BACKUP_DIR"
 [ -d "$DIALED_BACKUP_DIR" ] || die "$DIALED_BACKUP_DIR is not a directory"
@@ -34,10 +50,6 @@ mkdir -p "$DIALED_BACKUP_DIR"
 
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 temporary=$(mktemp "$DIALED_BACKUP_DIR/.dialed-backup.XXXXXX")
-cleanup() {
-  rm -f -- "$temporary"
-}
-trap cleanup 0 1 2 15
 
 if ! compose exec -T postgres pg_dump \
   -U "$POSTGRES_USER" \
@@ -52,7 +64,7 @@ fi
 
 archive="$DIALED_BACKUP_DIR/dialed-$timestamp-$APP_REVISION-$reason.dump"
 mv "$temporary" "$archive"
-trap - 0 1 2 15
+temporary=
 
 if [ "$reason" = "scheduled" ]; then
   find "$DIALED_BACKUP_DIR" \

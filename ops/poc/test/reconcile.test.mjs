@@ -19,6 +19,10 @@ const repositoryRoot = resolve(
   "../../..",
 );
 const reconcilePath = join(repositoryRoot, "ops/poc/bin/reconcile");
+const recordOperationPath = join(
+  repositoryRoot,
+  "ops/poc/bin/record-operation",
+);
 const candidateRevision = "0123456789abcdef0123456789abcdef01234567";
 const priorRevision = "1111111111111111111111111111111111111111";
 const webCandidate =
@@ -47,6 +51,7 @@ function fixture(t, { active = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), "dialed-reconcile-test-"));
   const bin = join(root, "bin");
   const state = join(root, "state");
+  const operations = join(state, "operations");
   const backups = join(root, "backups");
   const data = join(root, "data");
   const environmentFile = join(root, "poc.env");
@@ -54,8 +59,10 @@ function fixture(t, { active = true } = {}) {
   const activeState = join(state, "active.env");
   const rollbackState = join(state, "rollback.env");
   const dockerLog = join(root, "docker.log");
+  const recorder = join(bin, "record-operation");
   mkdirSync(bin);
   mkdirSync(state);
+  mkdirSync(operations);
   mkdirSync(backups);
   mkdirSync(data);
 
@@ -136,6 +143,13 @@ exit 99
 `,
   );
   chmodSync(docker, 0o755);
+  writeFileSync(
+    recorder,
+    `#!/bin/sh
+[ "$FAKE_RECORD_MODE" = fail ] && exit 72
+`,
+  );
+  chmodSync(recorder, 0o755);
 
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return {
@@ -147,7 +161,9 @@ exit 99
     composeFile,
     activeState,
     rollbackState,
+    operations,
     dockerLog,
+    recorder,
   };
 }
 
@@ -162,6 +178,7 @@ function runReconcile(value, overrides = {}, arguments_ = []) {
       DIALED_STATE_DIR: value.state,
       DIALED_ACTIVE_STATE: value.activeState,
       DIALED_ROLLBACK_STATE: value.rollbackState,
+      DIALED_RECORD_OPERATION: value.recorder,
       DIALED_LOCK_FILE: join(value.root, "deploy.lock"),
       DIALED_HEALTH_TIMEOUT_SECONDS: "0",
       DIALED_HEALTH_INTERVAL_SECONDS: "0",
@@ -176,6 +193,7 @@ function runReconcile(value, overrides = {}, arguments_ = []) {
       FAKE_API_PRIOR: apiPrior,
       FAKE_WEB_EXPIRED: webExpired,
       FAKE_API_EXPIRED: apiExpired,
+      FAKE_RECORD_MODE: "success",
       ...overrides,
     },
   });
@@ -194,10 +212,22 @@ test("unchanged exact digests exit without backup, migration, or restart", (t) =
     stateText(webCandidate, apiCandidate, candidateRevision),
     { mode: 0o600 },
   );
+  const operationState = join(value.operations, "deploy.env");
+  const beforeOperation = [
+    "RESULT=failure",
+    "TIMESTAMP_SECONDS=1787992400",
+    `REVISION=${priorRevision}`,
+    "REASON=rollback",
+    "",
+  ].join("\n");
+  writeFileSync(operationState, beforeOperation, { mode: 0o600 });
 
-  const result = runReconcile(value);
+  const result = runReconcile(value, {
+    DIALED_RECORD_OPERATION: recordOperationPath,
+  });
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(dockerLog(value), /pg_dump|run --rm|compose up/);
+  assert.equal(readFileSync(operationState, "utf8"), beforeOperation);
 });
 
 test("force reconciles unchanged exact digests without migration", (t) => {
@@ -349,4 +379,21 @@ test("first deployment promotes without a meaningless predeploy backup", (t) => 
   );
   assert.equal(existsSync(value.rollbackState), false);
   assert.doesNotMatch(dockerLog(value), /pg_dump/);
+});
+
+test("recorder failure does not change successful deployment status", (t) => {
+  const value = fixture(t);
+  const result = runReconcile(value, { FAKE_RECORD_MODE: "fail" });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("recorder failure does not change failed deployment status", (t) => {
+  const value = fixture(t);
+  const result = runReconcile(value, {
+    FAKE_MODE: "migration-fail",
+    FAKE_RECORD_MODE: "fail",
+  });
+
+  assert.equal(result.status, 25, result.stderr);
 });

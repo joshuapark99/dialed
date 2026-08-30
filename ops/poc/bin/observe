@@ -1,0 +1,151 @@
+#!/bin/sh
+set -eu
+
+[ "$#" -eq 0 ] || {
+  printf '%s\n' 'observe does not accept arguments' >&2
+  exit 1
+}
+
+poc_services='postgres api web cloudflared'
+observability_services='grafana loki prometheus'
+state_directory=${DIALED_STATE_DIR:-/var/lib/dialed}
+active_state=${DIALED_ACTIVE_STATE:-$state_directory/active.env}
+observability_directory=${DIALED_OBSERVABILITY_DIR:-/var/lib/dialed/observability}
+textfile_directory=$observability_directory/textfile
+destination=$textfile_directory/dialed.prom
+operation_directory=${DIALED_OPERATIONS_DIR:-$state_directory/operations}
+sentinel=$observability_directory/INGESTION_STOPPED
+
+[ -d "$textfile_directory" ] && [ ! -L "$textfile_directory" ] || {
+  printf '%s\n' "$textfile_directory must be an existing directory" >&2
+  exit 1
+}
+
+umask 027
+temporary=$(mktemp "$textfile_directory/.dialed.prom.XXXXXX")
+cleanup() {
+  rm -f -- "$temporary"
+}
+trap cleanup 0 1 2 15
+
+emit_container() {
+  stack=$1
+  project=$2
+  service=$3
+  container_ids=$(docker ps -aq \
+    --filter "label=com.docker.compose.project=$project" \
+    --filter "label=com.docker.compose.service=$service")
+  if [ -z "$container_ids" ]; then
+    running=0
+    health=none
+    restarts=0
+  else
+    container_id=$(printf '%s\n' "$container_ids" | sed -n '1p')
+    [ "$(printf '%s\n' "$container_ids" | sed -n '2p')" = "" ] || {
+      printf '%s\n' "multiple containers found for $project/$service" >&2
+      return 1
+    }
+    container_state=$(docker inspect \
+      --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}}' \
+      "$container_id")
+    set -- $container_state
+    [ "$#" -eq 3 ] || {
+      printf '%s\n' "invalid Docker state for $project/$service" >&2
+      return 1
+    }
+    case "$1" in
+      true) running=1 ;;
+      false) running=0 ;;
+      *)
+        printf '%s\n' "invalid running state for $project/$service" >&2
+        return 1
+        ;;
+    esac
+    case "$2" in
+      healthy | unhealthy | starting | none) health=$2 ;;
+      *) health=none ;;
+    esac
+    case "$3" in
+      *[!0-9]* | '')
+        printf '%s\n' "invalid restart count for $project/$service" >&2
+        return 1
+        ;;
+      *) restarts=$3 ;;
+    esac
+  fi
+  printf 'dialed_container_running{stack="%s",service="%s"} %s\n' \
+    "$stack" "$service" "$running"
+  printf 'dialed_container_health_status{stack="%s",service="%s",status="%s"} 1\n' \
+    "$stack" "$service" "$health"
+  printf 'dialed_container_restart_count{stack="%s",service="%s"} %s\n' \
+    "$stack" "$service" "$restarts"
+}
+
+emit_operation() {
+  operation=$1
+  metric_operation=$operation
+  [ "$operation" != deploy ] || metric_operation=deployment
+  operation_file=$operation_directory/$operation.env
+  [ -f "$operation_file" ] && [ ! -L "$operation_file" ] || return 0
+  result=$(sed -n 's/^RESULT=//p' "$operation_file")
+  timestamp=$(sed -n 's/^TIMESTAMP_SECONDS=//p' "$operation_file")
+  revision=$(sed -n 's/^REVISION=//p' "$operation_file")
+  reason=$(sed -n 's/^REASON=//p' "$operation_file")
+  case "$operation:$result:$reason" in
+    backup:success:scheduled | backup:success:predeploy | backup:failure:scheduled | backup:failure:predeploy | deploy:success:release | deploy:success:force | deploy:success:rollback | deploy:failure:release | deploy:failure:force | deploy:failure:rollback) ;;
+    *) return 0 ;;
+  esac
+  case "$timestamp" in '' | *[!0-9]*) return 0 ;; esac
+  case "$revision" in
+    *[!0-9a-f]* | ??????????????????????????????????????? | ?????????????????????????????????????????*) return 0 ;;
+  esac
+  printf 'dialed_operation_last_result{operation="%s",reason="%s",result="%s"} 1\n' \
+    "$metric_operation" "$reason" "$result"
+  printf 'dialed_operation_last_timestamp_seconds{operation="%s",reason="%s"} %s\n' \
+    "$metric_operation" "$reason" "$timestamp"
+}
+
+{
+  for service in $poc_services; do
+    emit_container poc dialed-poc "$service"
+  done
+  for service in $observability_services; do
+    emit_container observability dialed-observability "$service"
+  done
+  if [ -f "$active_state" ] && [ ! -L "$active_state" ]; then
+    active_revision=$(sed -n 's/^APP_REVISION=//p' "$active_state")
+    case "$active_revision" in
+      *[!0-9a-f]* | ??????????????????????????????????????? | ?????????????????????????????????????????*) ;;
+      *) printf 'dialed_active_revision_info{revision="%s"} 1\n' "$active_revision" ;;
+    esac
+  fi
+  emit_operation backup
+  emit_operation deploy
+  for endpoint in \
+    'grafana http://127.0.0.1:3002/api/health' \
+    'loki http://127.0.0.1:3100/ready' \
+    'prometheus http://127.0.0.1:9090/-/ready'; do
+    service=${endpoint%% *}
+    url=${endpoint#* }
+    if curl --fail --silent --show-error --max-time 2 "$url" >/dev/null 2>&1; then
+      up=1
+    else
+      up=0
+    fi
+    printf 'dialed_observability_endpoint_up{service="%s"} %s\n' "$service" "$up"
+  done
+  systemctl show --property=ActiveState --value dialed-poc-storage-guard.service >/dev/null 2>&1 || true
+  if [ -e "$sentinel" ]; then
+    stopped=1
+  else
+    stopped=0
+  fi
+  printf 'dialed_observability_ingestion_stopped %s\n' "$stopped"
+} >"$temporary"
+
+chmod 0640 "$temporary"
+if [ "$(id -u)" = 0 ]; then
+  chown root:alloy "$temporary"
+fi
+mv "$temporary" "$destination"
+trap - 0 1 2 15

@@ -1,0 +1,12 @@
+[Unit]
+Description=Schedule Dialed POC operational metric snapshots
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=dialed-poc-observe.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

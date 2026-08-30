@@ -1,0 +1,21 @@
+[Unit]
+Description=Snapshot allowlisted Dialed POC operational metrics
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/dialed/bin/observe
+UMask=0027
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/dialed/observability/textfile
+ReadOnlyPaths=/var/lib/dialed /run/systemd/private /var/run/docker.sock
+TimeoutStartSec=30s

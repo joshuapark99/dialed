@@ -5,6 +5,27 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck source=common
 . "$SCRIPT_DIR/common"
 
+zero_revision=0000000000000000000000000000000000000000
+record_deploy=0
+record_revision=$zero_revision
+record_reason=release
+candidate_state=
+rollback_temporary=
+record_exit() {
+  operation_status=$?
+  trap - 0 1 2 15
+  [ -z "$candidate_state" ] || rm -f -- "$candidate_state"
+  [ -z "$rollback_temporary" ] || rm -f -- "$rollback_temporary"
+  if [ "$operation_status" -ne 0 ] || [ "$record_deploy" = "1" ]; then
+    operation_result=failure
+    [ "$operation_status" -eq 0 ] && operation_result=success
+    "${DIALED_RECORD_OPERATION:-$SCRIPT_DIR/record-operation}" \
+      deploy "$operation_result" "$record_revision" "$record_reason" || true
+  fi
+  exit "$operation_status"
+}
+trap record_exit 0 1 2 15
+
 reconcile_mode=${1:-normal}
 [ "$#" -le 1 ] || die "usage: reconcile [force]"
 case "$reconcile_mode" in
@@ -169,6 +190,7 @@ validate_revision "$candidate_api_revision"
 [ "$candidate_web_revision" = "$candidate_api_revision" ] ||
   die "web and API OCI revisions do not match"
 candidate_revision=$candidate_web_revision
+record_revision=$candidate_revision
 
 DIALED_STATE_DIR=${DIALED_STATE_DIR:-/var/lib/dialed}
 DIALED_ACTIVE_STATE=${DIALED_ACTIVE_STATE:-$DIALED_STATE_DIR/active.env}
@@ -205,6 +227,9 @@ fi
 restore_prior_or_stop() {
   failure_message=$1
   if [ "$has_prior" = "1" ]; then
+    record_deploy=1
+    record_reason=rollback
+    record_revision=$prior_revision
     compose stop cloudflared >/dev/null 2>&1 || true
     WEB_IMAGE=$prior_web
     API_IMAGE=$prior_api
@@ -224,6 +249,9 @@ if [ "$has_prior" = "1" ] &&
   [ "$candidate_web" = "$prior_web" ] &&
   [ "$candidate_api" = "$prior_api" ]; then
   if [ "$reconcile_mode" = "force" ]; then
+    record_deploy=1
+    record_reason=force
+    record_revision=$prior_revision
     WEB_IMAGE=$prior_web
     API_IMAGE=$prior_api
     APP_REVISION=$prior_revision
@@ -238,15 +266,8 @@ if [ "$has_prior" = "1" ] &&
   exit 0
 fi
 
+record_deploy=1
 candidate_state=$(mktemp "$DIALED_STATE_DIR/.candidate.XXXXXX")
-rollback_temporary=
-cleanup() {
-  rm -f -- "$candidate_state"
-  if [ -n "$rollback_temporary" ]; then
-    rm -f -- "$rollback_temporary"
-  fi
-}
-trap cleanup 0 1 2 15
 write_state \
   "$candidate_state" \
   "$candidate_web" \
@@ -292,4 +313,3 @@ mv "$candidate_state" "$DIALED_ACTIVE_STATE"
 candidate_state=
 prune_repository_images "$WEB_REPOSITORY" "$candidate_web" "$prior_web"
 prune_repository_images "$API_REPOSITORY" "$candidate_api" "$prior_api"
-trap - 0 1 2 15

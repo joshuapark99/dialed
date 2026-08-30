@@ -1,0 +1,56 @@
+#!/bin/sh
+set -eu
+
+operation=${1:-}
+result=${2:-}
+revision=${3:-}
+reason=${4:-}
+[ "$#" -eq 4 ] || {
+  printf '%s\n' 'usage: record-operation OPERATION RESULT REVISION REASON' >&2
+  exit 1
+}
+
+case "$operation:$result:$reason" in
+  backup:success:scheduled | backup:success:predeploy | backup:failure:scheduled | backup:failure:predeploy | deploy:success:release | deploy:success:force | deploy:success:rollback | deploy:failure:release | deploy:failure:force | deploy:failure:rollback) ;;
+  *)
+    printf '%s\n' 'invalid operation, result, or reason' >&2
+    exit 1
+    ;;
+esac
+case "$revision" in
+  *[!0-9a-f]* | ??????????????????????????????????????? | ?????????????????????????????????????????*)
+    printf '%s\n' 'revision must be a lowercase 40-character Git revision' >&2
+    exit 1
+    ;;
+esac
+
+state_directory=${DIALED_STATE_DIR:-/var/lib/dialed}
+operation_directory=${DIALED_OPERATIONS_DIR:-$state_directory/operations}
+[ -d "$operation_directory" ] && [ ! -L "$operation_directory" ] || {
+  printf '%s\n' "$operation_directory must be an existing directory" >&2
+  exit 1
+}
+
+timestamp=$(date +%s)
+case "$timestamp" in
+  '' | *[!0-9]*)
+    printf '%s\n' 'date did not return Unix timestamp seconds' >&2
+    exit 1
+    ;;
+esac
+
+umask 077
+temporary=$(mktemp "$operation_directory/.${operation}.env.XXXXXX")
+cleanup() {
+  rm -f -- "$temporary"
+}
+trap cleanup 0 1 2 15
+{
+  printf 'RESULT=%s\n' "$result"
+  printf 'TIMESTAMP_SECONDS=%s\n' "$timestamp"
+  printf 'REVISION=%s\n' "$revision"
+  printf 'REASON=%s\n' "$reason"
+} >"$temporary"
+chmod 0600 "$temporary"
+mv "$temporary" "$operation_directory/$operation.env"
+trap - 0 1 2 15

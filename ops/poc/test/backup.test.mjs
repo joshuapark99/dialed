@@ -29,6 +29,7 @@ function fixture(t) {
   const activeState = join(root, "active.env");
   const composeFile = join(root, "compose.poc.yaml");
   const dockerLog = join(root, "docker.log");
+  const recordLog = join(root, "record-operation.log");
   mkdirSync(bin);
   mkdirSync(backups);
   mkdirSync(data);
@@ -80,6 +81,16 @@ esac
   writeFileSync(date, "#!/bin/sh\nprintf '%s\\n' \"$FAKE_DATE\"\n");
   chmodSync(date, 0o755);
 
+  const recorder = join(bin, "record-operation");
+  writeFileSync(
+    recorder,
+    `#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_RECORD_LOG"
+[ "$FAKE_RECORD_MODE" = fail ] && exit 71
+`,
+  );
+  chmodSync(recorder, 0o755);
+
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return {
     root,
@@ -89,10 +100,12 @@ esac
     activeState,
     composeFile,
     dockerLog,
+    recordLog,
+    recorder,
   };
 }
 
-function runBackup(fixtureValue, mode, reason = "scheduled") {
+function runBackup(fixtureValue, mode, reason = "scheduled", overrides = {}) {
   return spawnSync("sh", [backupPath, reason], {
     encoding: "utf8",
     env: {
@@ -100,12 +113,17 @@ function runBackup(fixtureValue, mode, reason = "scheduled") {
       PATH: `${fixtureValue.bin}:${process.env.PATH}`,
       DIALED_ENV_FILE: fixtureValue.environmentFile,
       DIALED_ACTIVE_STATE: fixtureValue.activeState,
+      DIALED_STATE_DIR: fixtureValue.root,
       DIALED_LOCK_FILE: join(fixtureValue.root, "deploy.lock"),
       DIALED_COMPOSE_FILE: fixtureValue.composeFile,
+      DIALED_RECORD_OPERATION: fixtureValue.recorder,
       FAKE_DOCKER_LOG: fixtureValue.dockerLog,
       FAKE_DOCKER_MODE: mode,
       FAKE_DUMP_CONTENT: "verified custom-format dump",
       FAKE_DATE: "20260829T031500Z",
+      FAKE_RECORD_LOG: fixtureValue.recordLog,
+      FAKE_RECORD_MODE: "success",
+      ...overrides,
     },
   });
 }
@@ -177,4 +195,22 @@ test("scheduled retention keeps fourteen dailies and every predeploy archive", (
     false,
   );
   for (const name of predeployNames) assert.ok(names.includes(name));
+});
+
+test("recorder failure does not change successful backup status", (t) => {
+  const value = fixture(t);
+  const result = runBackup(value, "success", "scheduled", {
+    FAKE_RECORD_MODE: "fail",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("recorder failure does not change failed backup status", (t) => {
+  const value = fixture(t);
+  const result = runBackup(value, "fail", "scheduled", {
+    FAKE_RECORD_MODE: "fail",
+  });
+
+  assert.equal(result.status, 1, result.stderr);
 });
