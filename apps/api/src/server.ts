@@ -2,6 +2,7 @@ import Fastify, {
   type FastifyInstance,
   type FastifyReply,
   type FastifyRequest,
+  type FastifyServerOptions,
 } from "fastify";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
@@ -23,7 +24,7 @@ export interface ServerDependencies {
   auth: AuthService;
   store: SyncStore;
   revision?: string;
-  logger?: boolean;
+  logger?: FastifyServerOptions["logger"];
 }
 
 function csvCell(value: unknown): string {
@@ -91,7 +92,10 @@ async function requireExpectedAccount(
 export function createServer(
   dependencies: ServerDependencies,
 ): FastifyInstance {
-  const app = Fastify({ logger: dependencies.logger ?? false });
+  const app = Fastify({
+    logger: dependencies.logger ?? false,
+    disableRequestLogging: Boolean(dependencies.logger),
+  });
   const revision = dependencies.revision ?? "development";
 
   void app.register(swagger, {
@@ -115,14 +119,30 @@ export function createServer(
   });
   void app.register(swaggerUi, { routePrefix: "/docs" });
 
-  app.setErrorHandler((error, _request, reply) => {
-    app.log.error(error);
+  app.setErrorHandler((error, request, reply) => {
+    request.log.error(
+      { err: error, route: request.routeOptions.url },
+      "request failed",
+    );
     void reply.code(500).send({
       error: {
         code: "internal_error",
         message: "The request could not be completed",
       },
     });
+  });
+
+  app.addHook("onResponse", async (request, reply) => {
+    request.log.info(
+      {
+        requestId: request.id,
+        method: request.method,
+        route: request.routeOptions.url,
+        statusCode: reply.statusCode,
+        responseTime: reply.elapsedTime,
+      },
+      "request completed",
+    );
   });
 
   app.get("/healthz", async () => ({ status: "ok", revision }));

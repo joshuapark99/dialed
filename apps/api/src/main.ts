@@ -1,6 +1,7 @@
 import { createDatabase, PostgresSyncStore } from "@dialed/db";
 import { createBetterAuthService } from "./auth.js";
 import { readConfig } from "./config.js";
+import { createProductionLoggerOptions } from "./logger.js";
 import { createServer } from "./server.js";
 
 const config = readConfig();
@@ -16,7 +17,7 @@ const app = createServer({
   auth,
   store: new PostgresSyncStore(database.db),
   revision: config.APP_REVISION,
-  logger: true,
+  logger: createProductionLoggerOptions(config.APP_REVISION),
 });
 
 const shutdown = async (signal: string) => {
