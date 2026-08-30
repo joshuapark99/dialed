@@ -216,9 +216,9 @@ Logs and metrics are disposable operational data. PostgreSQL backup jobs will no
 
 ## Resource Controls
 
-Grafana, Loki, and Prometheus will have Compose memory and CPU limits rather than unrestricted access to the Pi. The initial ceilings will be 256 MiB and one CPU for Grafana, 512 MiB and one CPU for Loki, and 384 MiB and one CPU for Prometheus. Alloy will use a 256 MiB systemd `MemoryMax` and a 50 percent `CPUQuota`. These are ceilings rather than reservations and limit the observability stack to at most 1.375 GiB of memory on the minimum supported 4 GB Pi. Implementation may lower a ceiling after measured Raspberry Pi acceptance, but raising one requires an explicit design update.
+Grafana, Loki, and Prometheus will have Compose memory and CPU limits rather than unrestricted access to the Pi. The initial ceilings will be 512 MiB and one CPU for Grafana, 512 MiB and one CPU for Loki, and 384 MiB and one CPU for Prometheus. Alloy will use a 256 MiB systemd `MemoryMax` and a 50 percent `CPUQuota`. These are ceilings rather than reservations and limit the observability stack to at most 1.625 GiB of memory on the minimum supported 4 GB Pi. Implementation may lower a ceiling after measured Raspberry Pi acceptance, but raising one requires an explicit design update.
 
-The limits will favor Dialed under contention. An out-of-memory restart or dropped telemetry is preferable to application, database, or tunnel disruption. Health checks and restart policies will cover each long-running observability component, but no Dialed service will depend on their health.
+The limits will favor Dialed under contention. An out-of-memory restart or dropped telemetry is preferable to application, database, or tunnel disruption. Restart policies will cover each long-running observability component, and the host operational probe will check each component's documented readiness endpoint. No Dialed service will depend on their health.
 
 High-cardinality labels, unnecessary collectors, sub-thirty-second scrape intervals, and verbose component logs are prohibited by the initial configuration because they multiply Pi CPU, memory, and storage use.
 
@@ -281,7 +281,7 @@ The runbook will document:
 
 ### Static and configuration tests
 
-- Render `compose.observability.yaml` with fixture values and require pinned images, resource limits, health checks, expected mounts, and only explicit loopback port bindings.
+- Render `compose.observability.yaml` with fixture values and require pinned images, resource limits, restart policies, expected mounts, documented readiness endpoints, and only explicit loopback port bindings.
 - Assert that observability services are absent from the POC application, ingress, and egress networks.
 - Validate Loki and Prometheus configuration with their supported configuration-check commands.
 - Validate Alloy configuration with its supported configuration-check command.
