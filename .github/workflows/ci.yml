@@ -172,6 +172,13 @@ jobs:
       - name: Verify POC topology and operations contracts
         if: matrix.arch == 'amd64'
         run: pnpm test:ops
+      - name: Validate Alloy configuration
+        if: matrix.arch == 'amd64'
+        run: |
+          docker run --rm \
+            -v "$PWD/ops/poc/observability/alloy/config.alloy:/etc/alloy/config.alloy:ro" \
+            grafana/alloy:v1.19.0 \
+            validate /etc/alloy/config.alloy
       - name: Build both targets for ${{ matrix.arch }}
         run: |
           docker buildx build --target web --platform "${{ matrix.platform }}" --build-arg VCS_REF="$GITHUB_SHA" --load -t dialed-web:ci .

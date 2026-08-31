@@ -85,6 +85,20 @@ test("container gate builds and exercises each architecture natively", () => {
   assert.match(containers, /\.State\.Health\.Status/);
 });
 
+test("container gate validates the Alloy configuration with the pinned runtime", () => {
+  const containers = job("containers");
+
+  assert.match(containers, /grafana\/alloy:v1\.19\.0/);
+  assert.match(
+    containers,
+    /grafana\/alloy:v1\.19\.0\s+\\?\s*validate \/etc\/alloy\/config\.alloy/,
+  );
+  assert.match(
+    containers,
+    /ops\/poc\/observability\/alloy\/config\.alloy:\/etc\/alloy\/config\.alloy:ro/,
+  );
+});
+
 test("each image target builds only its own dependency graph", () => {
   const webBuild = dockerStage("web-build");
   const apiBuild = dockerStage("api-build");

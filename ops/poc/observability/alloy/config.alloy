@@ -106,14 +106,14 @@ loki.process "journal" {
 
   stage.json {
     expressions = {
-      pino_level   = "level"
-      requestId    = "requestId"
-      method       = "method"
-      route        = "route"
-      statusCode   = "statusCode"
-      responseTime = "responseTime"
-      revision     = "revision"
-      msg          = "msg"
+      pino_level   = "level",
+      requestId    = "requestId",
+      method       = "method",
+      route        = "route",
+      statusCode   = "statusCode",
+      responseTime = "responseTime",
+      revision     = "revision",
+      msg          = "msg",
     }
   }
 
@@ -122,7 +122,7 @@ loki.process "journal" {
   // and message text remain log data rather than derived labels.
   stage.labels {
     values = {
-      pino_level = ""
+      pino_level = "",
     }
   }
 
@@ -131,7 +131,7 @@ loki.process "journal" {
 
     stage.static_labels {
       values = {
-        level = "debug"
+        level = "debug",
       }
     }
   }
@@ -141,7 +141,7 @@ loki.process "journal" {
 
     stage.static_labels {
       values = {
-        level = "info"
+        level = "info",
       }
     }
   }
@@ -151,7 +151,7 @@ loki.process "journal" {
 
     stage.static_labels {
       values = {
-        level = "warn"
+        level = "warn",
       }
     }
   }
@@ -161,7 +161,7 @@ loki.process "journal" {
 
     stage.static_labels {
       values = {
-        level = "error"
+        level = "error",
       }
     }
   }
