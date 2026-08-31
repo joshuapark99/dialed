@@ -139,33 +139,43 @@ jobs:
       - run: pnpm test:e2e
 
   containers:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up pnpm
+        if: matrix.arch == 'amd64'
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: 10.15.0
       - name: Set up Node.js
+        if: matrix.arch == 'amd64'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: pnpm
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-      - run: pnpm install --frozen-lockfile
+      - if: matrix.arch == 'amd64'
+        run: pnpm install --frozen-lockfile
       - name: Verify POC topology and operations contracts
+        if: matrix.arch == 'amd64'
         run: pnpm test:ops
-      - name: Build both targets for AMD64 and ARM64
+      - name: Build both targets for ${{ matrix.arch }}
         run: |
-          docker buildx build --target web --platform linux/amd64,linux/arm64 --build-arg VCS_REF="$GITHUB_SHA" --output type=cacheonly .
-          docker buildx build --target api --platform linux/amd64,linux/arm64 --build-arg VCS_REF="$GITHUB_SHA" --output type=cacheonly .
-          docker buildx build --target web --platform linux/amd64 --build-arg VCS_REF="$GITHUB_SHA" --load -t dialed-web:ci .
-          docker buildx build --target api --platform linux/amd64 --build-arg VCS_REF="$GITHUB_SHA" --load -t dialed-api:ci .
+          docker buildx build --target web --platform "${{ matrix.platform }}" --build-arg VCS_REF="$GITHUB_SHA" --load -t dialed-web:ci .
+          docker buildx build --target api --platform "${{ matrix.platform }}" --build-arg VCS_REF="$GITHUB_SHA" --load -t dialed-api:ci .
       - name: Inspect production image boundaries
         run: |
           for image in dialed-web:ci dialed-api:ci; do
@@ -225,26 +235,38 @@ jobs:
   publish:
     needs: [verify, audit, database, e2e, containers]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
       contents: read
       packages: write
-      attestations: write
-      id-token: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: web
             image: ghcr.io/joshuapark99/dialed-web
+            arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - target: web
+            image: ghcr.io/joshuapark99/dialed-web
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
           - target: api
             image: ghcr.io/joshuapark99/dialed-api
+            arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - target: api
+            image: ghcr.io/joshuapark99/dialed-api
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Log in to GHCR
@@ -258,35 +280,116 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ matrix.image }}
-          tags: |
-            type=raw,value=sha-${{ github.sha }}
-            type=raw,value=poc
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-      - name: Build and publish multi-platform image
-        id: push
+      - name: Build and publish native image digest
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           target: ${{ matrix.target }}
-          platforms: linux/amd64,linux/arm64
-          push: true
+          platforms: ${{ matrix.platform }}
           build-args: VCS_REF=${{ github.sha }}
-          tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.target }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
-      - name: Attest image provenance
+          provenance: false
+          outputs: type=image,name=${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.target }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}-${{ matrix.arch }}
+      - name: Export image digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+      - name: Upload image digest
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: digests-${{ matrix.target }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-manifests:
+    needs: publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download web image digests
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: digests-web-*
+          path: /tmp/digests/web
+          merge-multiple: true
+      - name: Download API image digests
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: digests-api-*
+          path: /tmp/digests/api
+          merge-multiple: true
+      - name: Assemble and promote multi-platform images
+        id: manifests
+        env:
+          WEB_IMAGE: ghcr.io/joshuapark99/dialed-web
+          API_IMAGE: ghcr.io/joshuapark99/dialed-api
+        run: |
+          create_manifest() {
+            image=$1
+            digest_directory=$2
+            references=()
+            while IFS= read -r digest_file; do
+              references+=("$image@sha256:$(basename "$digest_file")")
+            done < <(find "$digest_directory" -maxdepth 1 -type f | sort)
+            test "${#references[@]}" -eq 2
+            docker buildx imagetools create \
+              --tag "$image:sha-${{ github.sha }}" \
+              "${references[@]}"
+          }
+
+          create_manifest "$WEB_IMAGE" /tmp/digests/web
+          create_manifest "$API_IMAGE" /tmp/digests/api
+
+          docker buildx imagetools create \
+            --tag "$WEB_IMAGE:poc" \
+            "$WEB_IMAGE:sha-${{ github.sha }}"
+          docker buildx imagetools create \
+            --tag "$API_IMAGE:poc" \
+            "$API_IMAGE:sha-${{ github.sha }}"
+
+          web_digest=$(docker buildx imagetools inspect "$WEB_IMAGE:sha-${{ github.sha }}" --format '{{.Manifest.Digest}}')
+          api_digest=$(docker buildx imagetools inspect "$API_IMAGE:sha-${{ github.sha }}" --format '{{.Manifest.Digest}}')
+          echo "web-digest=$web_digest" >> "$GITHUB_OUTPUT"
+          echo "api-digest=$api_digest" >> "$GITHUB_OUTPUT"
+      - name: Attest web image provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-name: ${{ matrix.image }}
-          subject-digest: ${{ steps.push.outputs.digest }}
+          subject-name: ghcr.io/joshuapark99/dialed-web
+          subject-digest: ${{ steps.manifests.outputs.web-digest }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Attest API image provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/joshuapark99/dialed-api
+          subject-digest: ${{ steps.manifests.outputs.api-digest }}
           push-to-registry: true
           create-storage-record: false
 
   smoke:
-    needs: publish
+    needs: publish-manifests
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
