@@ -27,15 +27,30 @@ function fixture(t) {
   const observability = join(root, "observability");
   const environmentFile = join(root, "poc.env");
   const commandLog = join(root, "commands.log");
+  const alloyState = join(root, "alloy.state");
   mkdirSync(bin);
   mkdirSync(observability);
+  writeFileSync(alloyState, "active\n");
 
   for (const [name, source] of Object.entries({
     date: "#!/bin/sh\nprintf '%s\\n' 2026-08-30T12:34:56Z\n",
     du: '#!/bin/sh\nprintf \'du %s\\n\' "$*" >> "$FAKE_COMMAND_LOG"\nprintf \'%s\\t%s\\n\' "$FAKE_USED_BYTES" "$2"\n',
     df: "#!/bin/sh\nprintf 'df %s\\n' \"$*\" >> \"$FAKE_COMMAND_LOG\"\nprintf '%s\\n' 'Filesystem 1B-blocks Used Available Use% Mounted on'\nprintf '%s\\n' \"/dev/fake 1000000 1 $FAKE_FREE_BYTES 1% /fake\"\n",
-    systemctl:
-      '#!/bin/sh\nprintf \'systemctl %s\\n\' "$*" >> "$FAKE_COMMAND_LOG"\n',
+    systemctl: `#!/bin/sh
+printf 'systemctl %s\n' "$*" >> "$FAKE_COMMAND_LOG"
+case "$1" in
+  show)
+    [ "$FAKE_SYSTEMCTL_MODE" = "show-fail" ] && exit 74
+    cat "$FAKE_ALLOY_STATE"
+    ;;
+  stop)
+    [ "$FAKE_SYSTEMCTL_MODE" = "stop-fail" ] && exit 75
+    [ "$FAKE_SYSTEMCTL_MODE" = "stop-stuck" ] && exit 0
+    printf '%s\n' inactive > "$FAKE_ALLOY_STATE"
+    ;;
+  *) exit 76 ;;
+esac
+`,
   })) {
     const path = join(bin, name);
     writeFileSync(path, source);
@@ -44,6 +59,7 @@ function fixture(t) {
 
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return {
+    alloyState,
     bin,
     commandLog,
     environmentFile,
@@ -79,6 +95,8 @@ function runGuard(value, settings = {}) {
       FAKE_COMMAND_LOG: value.commandLog,
       FAKE_FREE_BYTES: settings.freeBytes ?? "201",
       FAKE_USED_BYTES: settings.usedBytes ?? "99",
+      FAKE_ALLOY_STATE: value.alloyState,
+      FAKE_SYSTEMCTL_MODE: settings.systemctlMode ?? "success",
       PATH: `${value.bin}:${process.env.PATH}`,
     },
   });
@@ -144,9 +162,13 @@ test("storage boundaries stop only Alloy and atomically record the active thresh
     const result = runGuard(value, entry);
     assert.equal(result.status, 0, `${entry.label}: ${result.stderr}`);
     assert.deepEqual(
-      commands(value).slice(-1),
+      commands(value).slice(entry.stopped ? -3 : -1),
       entry.stopped
-        ? ["systemctl stop dialed-poc-alloy.service"]
+        ? [
+            "systemctl show --property=ActiveState --value dialed-poc-alloy.service",
+            "systemctl stop dialed-poc-alloy.service",
+            "systemctl show --property=ActiveState --value dialed-poc-alloy.service",
+          ]
         : ["df -PB1 " + value.observability],
     );
     assert.equal(existsSync(value.sentinel), entry.stopped, entry.label);
@@ -171,7 +193,7 @@ test("storage boundaries stop only Alloy and atomically record the active thresh
   }
 });
 
-test("the same active condition leaves an existing sentinel and Alloy journal untouched", (t) => {
+test("an unchanged sentinel still stops Alloy after a manual restart", (t) => {
   const value = fixture(t);
   writeFileSync(value.sentinel, "reason=used_bytes\noperator_note=preserve\n", {
     mode: 0o600,
@@ -187,7 +209,70 @@ test("the same active condition leaves an existing sentinel and Alloy journal un
   assert.deepEqual(commands(value), [
     `du -sB1 ${value.observability}`,
     `df -PB1 ${value.observability}`,
+    "systemctl show --property=ActiveState --value dialed-poc-alloy.service",
+    "systemctl stop dialed-poc-alloy.service",
+    "systemctl show --property=ActiveState --value dialed-poc-alloy.service",
   ]);
+  assert.match(result.stderr, /CRITICAL.*stopping dialed-poc-alloy\.service/);
+});
+
+test("an inactive Alloy service leaves an unchanged sentinel untouched without stop noise", (t) => {
+  const value = fixture(t);
+  writeFileSync(value.sentinel, "reason=used_bytes\noperator_note=preserve\n", {
+    mode: 0o600,
+  });
+  writeFileSync(value.alloyState, "inactive\n");
+
+  const result = runGuard(value, { usedBytes: "100" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.equal(
+    readFileSync(value.sentinel, "utf8"),
+    "reason=used_bytes\noperator_note=preserve\n",
+  );
+  assert.deepEqual(commands(value).slice(-1), [
+    "systemctl show --property=ActiveState --value dialed-poc-alloy.service",
+  ]);
+});
+
+test("a failed stop exits nonzero and the next timer run retries the unchanged incident", (t) => {
+  const value = fixture(t);
+
+  const failed = runGuard(value, {
+    systemctlMode: "stop-fail",
+    usedBytes: "100",
+  });
+  assert.notEqual(failed.status, 0);
+  assert.equal(existsSync(value.sentinel), true);
+  const sentinel = readFileSync(value.sentinel, "utf8");
+  assert.match(failed.stderr, /CRITICAL.*stopping dialed-poc-alloy\.service/);
+  assert.match(
+    failed.stderr,
+    /CRITICAL.*failed to stop dialed-poc-alloy\.service/,
+  );
+  assert.equal(readFileSync(value.alloyState, "utf8"), "active\n");
+
+  const retried = runGuard(value, { usedBytes: "100" });
+  assert.equal(retried.status, 0, retried.stderr);
+  assert.equal(readFileSync(value.sentinel, "utf8"), sentinel);
+  assert.equal(readFileSync(value.alloyState, "utf8"), "inactive\n");
+  assert.deepEqual(commands(value).slice(-3), [
+    "systemctl show --property=ActiveState --value dialed-poc-alloy.service",
+    "systemctl stop dialed-poc-alloy.service",
+    "systemctl show --property=ActiveState --value dialed-poc-alloy.service",
+  ]);
+});
+
+test("state-check and post-stop verification failures remain retryable", (t) => {
+  for (const systemctlMode of ["show-fail", "stop-fail", "stop-stuck"]) {
+    const value = fixture(t);
+    const result = runGuard(value, { systemctlMode, usedBytes: "100" });
+
+    assert.notEqual(result.status, 0, systemctlMode);
+    assert.equal(existsSync(value.sentinel), true);
+    assert.match(result.stderr, /CRITICAL/);
+  }
 });
 
 test("below threshold never clears a prior stop marker or resumes ingestion", (t) => {
@@ -229,7 +314,9 @@ test("the guard source cannot delete data or target anything except Alloy", () =
     source,
     /\brm\b|\bdocker\b|\bfind\b|\b(?:api|web|postgres)\.service\b/i,
   );
-  assert.deepEqual(source.match(/systemctl[^\n]*/g), [
-    "systemctl stop dialed-poc-alloy.service",
-  ]);
+  assert.doesNotMatch(source, /systemctl\s+(?:start|restart|enable|disable)/);
+  for (const command of source.match(/systemctl[^\n]*/g) ?? []) {
+    assert.match(command, /(?:show|stop)/);
+    assert.match(command, /dialed-poc-alloy\.service/);
+  }
 });

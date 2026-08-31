@@ -8,7 +8,7 @@ Type=simple
 User=alloy
 Group=alloy
 SupplementaryGroups=adm systemd-journal
-ExecStart=/usr/bin/alloy run --server.http.listen-addr=127.0.0.1:12345 --storage.path=/var/lib/dialed/observability/alloy /etc/alloy/config.alloy
+ExecStart=/usr/bin/alloy run --server.http.listen-addr=127.0.0.1:12345 --storage.path=/run/dialed-observability/alloy /opt/dialed/observability/alloy/config.alloy
 Restart=on-failure
 RestartSec=5s
 MemoryMax=256M
@@ -18,8 +18,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/dialed/observability/alloy
-ReadOnlyPaths=/etc/alloy/config.alloy /var/lib/dialed/observability/textfile /var/log/journal /run/log/journal
+RuntimeDirectory=dialed-observability
+RuntimeDirectoryMode=0750
+ReadWritePaths=/run/dialed-observability/alloy
+ReadOnlyPaths=/opt/dialed/observability/alloy/config.alloy /run/dialed-observability/textfile /var/log/journal /run/log/journal
 
 [Install]
 WantedBy=multi-user.target

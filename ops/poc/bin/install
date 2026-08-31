@@ -74,6 +74,19 @@ install_configuration_tree() {
     done
 }
 
+# shellcheck source=../lib/install-phases.sh
+. "$POC_ROOT/lib/install-phases.sh"
+
+core_stage=
+observability_stage=
+journald_stage=
+cleanup_stage() {
+  [ -z "$core_stage" ] || rm -rf -- "$core_stage"
+  [ -z "$observability_stage" ] || rm -rf -- "$observability_stage"
+  [ -z "$journald_stage" ] || rm -f -- "$journald_stage"
+}
+trap cleanup_stage 0 1 2 15
+
 [ "$(id -u)" = "0" ] || die "run this installer as root"
 case "$(uname -m)" in
   aarch64 | arm64) ;;
@@ -86,9 +99,6 @@ require_command getent
 require_command install
 require_command realpath
 require_command systemctl
-[ -x /usr/bin/alloy ] || die "/usr/bin/alloy is required"
-alloy_version_output=$(/usr/bin/alloy --version 2>&1)
-require_alloy_version "$alloy_version_output"
 require_compose_version
 docker info >/dev/null 2>&1 || die "the Docker daemon is not available"
 
@@ -98,151 +108,198 @@ install -o root -g root -m 0600 \
   "$POC_ROOT/poc.env.example" \
   /etc/dialed/poc.env.example
 
-if [ ! -e /etc/dialed/poc.env ]; then
-  die "create /etc/dialed/poc.env from /etc/dialed/poc.env.example, fill every value, set root:root ownership and mode 0600, then rerun"
-fi
+validate_core_assets() {
+  if [ ! -e /etc/dialed/poc.env ]; then
+    die "create /etc/dialed/poc.env from /etc/dialed/poc.env.example, fill every value, set root:root ownership and mode 0600, then rerun"
+  fi
 
-DIALED_ENV_FILE=/etc/dialed/poc.env
-export DIALED_ENV_FILE
-load_poc_env
-for required_name in \
-  APP_URL \
-  BETTER_AUTH_SECRET \
-  GOOGLE_CLIENT_ID \
-  GOOGLE_CLIENT_SECRET \
-  POSTGRES_USER \
-  POSTGRES_PASSWORD \
-  POSTGRES_DB \
-  TUNNEL_TOKEN; do
-  eval "required_value=\${$required_name:-}"
-  require_value "$required_name" "$required_value"
-done
+  DIALED_ENV_FILE=/etc/dialed/poc.env
+  export DIALED_ENV_FILE
+  load_poc_env
+  for required_name in \
+    APP_URL \
+    BETTER_AUTH_SECRET \
+    GOOGLE_CLIENT_ID \
+    GOOGLE_CLIENT_SECRET \
+    POSTGRES_USER \
+    POSTGRES_PASSWORD \
+    POSTGRES_DB \
+    TUNNEL_TOKEN; do
+    eval "required_value=\${$required_name:-}"
+    require_value "$required_name" "$required_value"
+  done
 
-printf '%s\n' "$APP_URL" |
-  grep -Eq '^https://[A-Za-z0-9.-]+(:[0-9]+)?$' ||
-  die "APP_URL must be an HTTPS origin without credentials, path, query, or trailing slash"
-[ "${#BETTER_AUTH_SECRET}" -ge 32 ] ||
-  die "BETTER_AUTH_SECRET must contain at least 32 characters"
-printf '%s\n' "$POSTGRES_PASSWORD" | grep -Eq '^[A-Za-z0-9._~-]+$' ||
-  die "POSTGRES_PASSWORD must use only URL-safe unreserved characters"
-validate_observability_environment
-postgres_path=$data_path/postgres
+  printf '%s\n' "$APP_URL" |
+    grep -Eq '^https://[A-Za-z0-9.-]+(:[0-9]+)?$' ||
+    die "APP_URL must be an HTTPS origin without credentials, path, query, or trailing slash"
+  [ "${#BETTER_AUTH_SECRET}" -ge 32 ] ||
+    die "BETTER_AUTH_SECRET must contain at least 32 characters"
+  printf '%s\n' "$POSTGRES_PASSWORD" | grep -Eq '^[A-Za-z0-9._~-]+$' ||
+    die "POSTGRES_PASSWORD must use only URL-safe unreserved characters"
+  validate_core_storage_environment
 
-ensure_component_directory DIALED_DATA_DIR "$data_path" root root 0700
-ensure_component_directory DIALED_BACKUP_DIR "$backup_path" root root 0700
-ensure_component_directory DIALED_OBSERVABILITY_DIR "$observability_path" root root 0700
-if [ -e "$postgres_path" ]; then
-  [ -d "$postgres_path" ] || die "$postgres_path must be a directory"
-  [ ! -L "$postgres_path" ] || die "$postgres_path must not be a symbolic link"
-else
-  install -d -o root -g root -m 0700 "$postgres_path"
-fi
-ensure_component_directory grafana "$observability_path/grafana" 472 472 0700
-ensure_component_directory loki "$observability_path/loki" 10001 10001 0700
-ensure_component_directory prometheus "$observability_path/prometheus" 65534 65534 0700
-ensure_component_directory alloy "$observability_path/alloy" alloy alloy 0700
-ensure_component_directory textfile "$observability_path/textfile" root alloy 0750
-ensure_component_directory operations "$observability_path/operations" root root 0700
-ensure_component_directory operations /var/lib/dialed/operations root root 0700
-
-stage_directory=$(mktemp -d /opt/dialed/.observability-stage.XXXXXX)
-cleanup_stage() {
-  rm -rf -- "$stage_directory"
-}
-trap cleanup_stage 0 1 2 15
-install -o root -g root -m 0644 \
-  "$REPOSITORY_ROOT/compose.poc.yaml" \
-  "$stage_directory/compose.poc.yaml"
-install -o root -g root -m 0644 \
-  "$REPOSITORY_ROOT/compose.observability.yaml" \
-  "$stage_directory/compose.observability.yaml"
-install_configuration_tree "$POC_ROOT/observability" "$stage_directory/observability"
-
-# Pulling these pinned host assets belongs to installation, never reconciliation.
-docker pull grafana/grafana:13.1.3
-docker pull grafana/loki:3.7.6
-docker pull prom/prometheus:v3.13.2
-
-zero_revision=0000000000000000000000000000000000000000
-zero_digest=0000000000000000000000000000000000000000000000000000000000000000
-WEB_IMAGE="ghcr.io/joshuapark99/dialed-web@sha256:$zero_digest"
-API_IMAGE="ghcr.io/joshuapark99/dialed-api@sha256:$zero_digest"
-APP_REVISION=$zero_revision
-DIALED_OBSERVABILITY_CONFIG_DIR=$stage_directory/observability
-export WEB_IMAGE API_IMAGE APP_REVISION DIALED_OBSERVABILITY_CONFIG_DIR
-docker compose \
-  --env-file /etc/dialed/poc.env \
-  -f "$stage_directory/compose.poc.yaml" \
-  config --quiet
-docker compose \
-  --env-file /etc/dialed/poc.env \
-  -f "$stage_directory/compose.observability.yaml" \
-  config --quiet
-/usr/bin/alloy validate "$stage_directory/observability/alloy/config.alloy"
-docker run --rm \
-  -v "$stage_directory/observability/loki.yaml:/etc/loki/config.yaml:ro" \
-  grafana/loki:3.7.6 \
-  -verify-config=true \
-  -config.file=/etc/loki/config.yaml
-docker run --rm \
-  --entrypoint promtool \
-  -v "$stage_directory/observability/prometheus.yaml:/etc/prometheus/prometheus.yml:ro" \
-  prom/prometheus:v3.13.2 \
-  check config /etc/prometheus/prometheus.yml
-
-install -o root -g root -m 0644 \
-  "$stage_directory/compose.poc.yaml" \
-  /opt/dialed/compose.poc.yaml
-install -o root -g root -m 0644 \
-  "$stage_directory/compose.observability.yaml" \
-  /opt/dialed/compose.observability.yaml
-install_configuration_tree "$stage_directory/observability" /opt/dialed/observability
-for executable in \
-  common backup reconcile check-external.mjs observe record-operation storage-guard observability; do
-  install -o root -g root -m 0755 \
-    "$POC_ROOT/bin/$executable" \
-    "/opt/dialed/bin/$executable"
-done
-for library in "$POC_ROOT"/lib/*.mjs; do
-  install -D -o root -g root -m 0644 \
-    "$library" \
-    "/opt/dialed/lib/$(basename "$library")"
-done
-for unit in \
-  dialed-poc-observability.service \
-  dialed-poc-observe.service \
-  dialed-poc-observe.timer \
-  dialed-poc-storage-guard.service \
-  dialed-poc-storage-guard.timer \
-  dialed-poc-alloy.service \
-  dialed-poc-deploy.service \
-  dialed-poc-deploy.timer \
-  dialed-poc-backup.service \
-  dialed-poc-backup.timer; do
+  core_stage=$(mktemp -d /opt/dialed/.core-stage.XXXXXX)
   install -o root -g root -m 0644 \
-    "$POC_ROOT/systemd/$unit" \
-    "/etc/systemd/system/$(basename "$unit")"
-done
+    "$REPOSITORY_ROOT/compose.poc.yaml" \
+    "$core_stage/compose.poc.yaml"
 
-install -d -o root -g root -m 0755 /etc/systemd/journald.conf.d
-journald_stage=$(mktemp /etc/systemd/journald.conf.d/.90-dialed-poc.conf.XXXXXX)
-install -o root -g root -m 0644 \
-  "$POC_ROOT/observability/journald/90-dialed-poc.conf" \
-  "$journald_stage"
-mv -f "$journald_stage" /etc/systemd/journald.conf.d/90-dialed-poc.conf
-systemctl restart systemd-journald.service
+  zero_revision=0000000000000000000000000000000000000000
+  zero_digest=0000000000000000000000000000000000000000000000000000000000000000
+  WEB_IMAGE="ghcr.io/joshuapark99/dialed-web@sha256:$zero_digest"
+  API_IMAGE="ghcr.io/joshuapark99/dialed-api@sha256:$zero_digest"
+  APP_REVISION=$zero_revision
+  export WEB_IMAGE API_IMAGE APP_REVISION
+  docker compose \
+    --env-file /etc/dialed/poc.env \
+    -f "$core_stage/compose.poc.yaml" \
+    config --quiet
+}
 
-systemctl daemon-reload
-if ! systemctl enable --now dialed-poc-observability.service; then
-  printf '%s\n' \
-    "Dialed POC application stack was left unchanged because observability startup failed." >&2
-  exit 1
-fi
-systemctl enable --now dialed-poc-observe.timer
-systemctl enable --now dialed-poc-storage-guard.timer
-systemctl enable --now dialed-poc-alloy.service
-systemctl enable --now dialed-poc-deploy.timer
-systemctl enable --now dialed-poc-backup.timer
+activate_core_assets() {
+  postgres_path=$data_path/postgres
+  ensure_component_directory DIALED_DATA_DIR "$data_path" root root 0700
+  ensure_component_directory DIALED_BACKUP_DIR "$backup_path" root root 0700
+  if [ -e "$postgres_path" ]; then
+    [ -d "$postgres_path" ] || die "$postgres_path must be a directory"
+    [ ! -L "$postgres_path" ] || die "$postgres_path must not be a symbolic link"
+  else
+    install -d -o root -g root -m 0700 "$postgres_path"
+  fi
+  ensure_component_directory operations /var/lib/dialed/operations root root 0700
+
+  install -o root -g root -m 0644 \
+    "$core_stage/compose.poc.yaml" \
+    /opt/dialed/compose.poc.yaml
+  for executable in \
+    common backup reconcile check-external.mjs record-operation; do
+    install -o root -g root -m 0755 \
+      "$POC_ROOT/bin/$executable" \
+      "/opt/dialed/bin/$executable"
+  done
+  for library in "$POC_ROOT"/lib/*.mjs; do
+    install -D -o root -g root -m 0644 \
+      "$library" \
+      "/opt/dialed/lib/$(basename "$library")"
+  done
+  for unit in \
+    dialed-poc-deploy.service \
+    dialed-poc-deploy.timer \
+    dialed-poc-backup.service \
+    dialed-poc-backup.timer; do
+    install -o root -g root -m 0644 \
+      "$POC_ROOT/systemd/$unit" \
+      "/etc/systemd/system/$(basename "$unit")"
+  done
+}
+
+enable_core_timers() {
+  systemctl daemon-reload
+  systemctl enable --now dialed-poc-deploy.timer
+  systemctl enable --now dialed-poc-backup.timer
+}
+
+prepare_observability_assets() {
+  require_command systemd-analyze
+  [ -x /usr/bin/alloy ] || die "/usr/bin/alloy is required"
+  alloy_version_output=$(/usr/bin/alloy --version 2>&1)
+  require_alloy_version "$alloy_version_output"
+  validate_observability_environment
+
+  ensure_component_directory DIALED_OBSERVABILITY_DIR "$observability_path" root root 0700
+  ensure_component_directory grafana "$observability_path/grafana" 472 472 0700
+  ensure_component_directory loki "$observability_path/loki" 10001 10001 0700
+  ensure_component_directory prometheus "$observability_path/prometheus" 65534 65534 0700
+  ensure_component_directory alloy "$observability_path/alloy" alloy alloy 0700
+  ensure_component_directory textfile "$observability_path/textfile" root alloy 0750
+  ensure_component_directory operations "$observability_path/operations" root root 0700
+
+  observability_stage=$(mktemp -d /opt/dialed/.observability-stage.XXXXXX)
+  install -o root -g root -m 0644 \
+    "$REPOSITORY_ROOT/compose.observability.yaml" \
+    "$observability_stage/compose.observability.yaml"
+  install_configuration_tree \
+    "$POC_ROOT/observability" \
+    "$observability_stage/observability"
+  DIALED_OBSERVABILITY_CONFIG_DIR=$observability_stage/observability
+  export DIALED_OBSERVABILITY_CONFIG_DIR
+}
+
+pull_observability_images() {
+  # Pulling these pinned host assets belongs to installation, never reconciliation.
+  docker pull grafana/grafana:13.1.3
+  docker pull grafana/loki:3.7.6
+  docker pull prom/prometheus:v3.13.2
+}
+
+validate_observability_assets() {
+  docker compose \
+    --env-file /etc/dialed/poc.env \
+    -f "$observability_stage/compose.observability.yaml" \
+    config --quiet
+  /usr/bin/alloy validate "$observability_stage/observability/alloy/config.alloy"
+  docker run --rm \
+    -v "$observability_stage/observability/loki.yaml:/etc/loki/config.yaml:ro" \
+    grafana/loki:3.7.6 \
+    -verify-config=true \
+    -config.file=/etc/loki/config.yaml
+  docker run --rm \
+    --entrypoint promtool \
+    -v "$observability_stage/observability/prometheus.yaml:/etc/prometheus/prometheus.yml:ro" \
+    prom/prometheus:v3.13.2 \
+    check config /etc/prometheus/prometheus.yml
+}
+
+activate_observability_assets() {
+  install -o root -g root -m 0644 \
+    "$observability_stage/compose.observability.yaml" \
+    /opt/dialed/compose.observability.yaml
+  install_configuration_tree \
+    "$observability_stage/observability" \
+    /opt/dialed/observability
+  for executable in \
+    observe storage-guard observability render-observability-units; do
+    install -o root -g root -m 0755 \
+      "$POC_ROOT/bin/$executable" \
+      "/opt/dialed/bin/$executable"
+  done
+  for unit in \
+    dialed-poc-observability.service \
+    dialed-poc-observe.service \
+    dialed-poc-observe.timer \
+    dialed-poc-storage-guard.service \
+    dialed-poc-storage-guard.timer \
+    dialed-poc-alloy.service; do
+    install -o root -g root -m 0644 \
+      "$POC_ROOT/systemd/$unit" \
+      "/etc/systemd/system/$(basename "$unit")"
+  done
+  sh "$POC_ROOT/bin/render-observability-units" \
+    /etc/systemd/system \
+    "$observability_path"
+
+  install -d -o root -g root -m 0755 /etc/systemd/journald.conf.d
+  journald_stage=$(mktemp /etc/systemd/journald.conf.d/.90-dialed-poc.conf.XXXXXX)
+  install -o root -g root -m 0644 \
+    "$POC_ROOT/observability/journald/90-dialed-poc.conf" \
+    "$journald_stage"
+  mv -f "$journald_stage" /etc/systemd/journald.conf.d/90-dialed-poc.conf
+  journald_stage=
+  systemd-analyze verify \
+    /etc/systemd/system/dialed-poc-alloy.service \
+    /etc/systemd/system/dialed-poc-observe.service \
+    /etc/systemd/system/dialed-poc-storage-guard.service
+}
+
+start_observability_services() {
+  systemctl restart systemd-journald.service
+  systemctl daemon-reload
+  systemctl enable --now dialed-poc-observability.service
+  systemctl enable --now dialed-poc-observe.timer
+  systemctl enable --now dialed-poc-storage-guard.timer
+  systemctl enable --now dialed-poc-alloy.service
+}
+
+run_installation_phases
 
 printf '%s\n' \
   "Dialed POC host assets installed." \

@@ -24,7 +24,19 @@ record_exit() {
   fi
   exit "$operation_status"
 }
-trap record_exit 0 1 2 15
+handle_hup() {
+  exit 129
+}
+handle_int() {
+  exit 130
+}
+handle_term() {
+  exit 143
+}
+trap record_exit 0
+trap handle_hup 1
+trap handle_int 2
+trap handle_term 15
 
 reconcile_mode=${1:-normal}
 [ "$#" -le 1 ] || die "usage: reconcile [force]"

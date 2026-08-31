@@ -191,7 +191,7 @@ GRAFANA_ADMIN_USER=admin
 GRAFANA_ADMIN_PASSWORD=replace-with-a-unique-32-character-or-longer-secret
 ```
 
-The data, backup, and observability directories must each be absolute, dedicated nested paths and must not contain, or be contained by, another one. After filling the file, install reviewed host assets:
+The data, backup, and observability directories must each be absolute, dedicated nested paths and must not contain, or be contained by, another one. The observability path must also be canonical, must not traverse a symbolic link, and may use only letters, digits, `/`, `.`, `_`, and `-` so the installer can encode it literally in reviewed systemd drop-ins. The installer keeps the observability root `root:root` mode `0700`; systemd bind-mounts only the Alloy state and textfile children into Alloy's private runtime path, so Alloy never receives traversal access to that root. After filling the file, install reviewed host assets:
 
 ```bash
 sudo ops/poc/bin/install
@@ -235,15 +235,15 @@ The five-minute storage guard stops only Alloy and writes the sentinel when the 
 Do not restart Alloy merely to clear this condition. First inspect the recorded reason and both measurements, then correct the underlying capacity problem (for example, free capacity outside the observability directory or make and review a threshold change):
 
 ```bash
-sudo cat /var/lib/dialed/observability/INGESTION_STOPPED
-sudo du -sB1 /var/lib/dialed/observability
-sudo df -PB1 /var/lib/dialed/observability
+sudo sh -c '. /etc/dialed/poc.env; cat "$DIALED_OBSERVABILITY_DIR/INGESTION_STOPPED"'
+sudo sh -c '. /etc/dialed/poc.env; du -sB1 "$DIALED_OBSERVABILITY_DIR"'
+sudo sh -c '. /etc/dialed/poc.env; df -PB1 "$DIALED_OBSERVABILITY_DIR"'
 ```
 
 After capacity is safe, remove only the exact sentinel and explicitly start Alloy:
 
 ```bash
-sudo rm -- /var/lib/dialed/observability/INGESTION_STOPPED
+sudo sh -c '. /etc/dialed/poc.env; rm -- "$DIALED_OBSERVABILITY_DIR/INGESTION_STOPPED"'
 sudo systemctl start dialed-poc-alloy.service
 sudo systemctl status dialed-poc-alloy.service --no-pager
 ```

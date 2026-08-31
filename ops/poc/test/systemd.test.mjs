@@ -1,10 +1,19 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const pocRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const renderUnitsPath = join(pocRoot, "bin", "render-observability-units");
 
 function readUnit(name) {
   return readFileSync(join(pocRoot, "systemd", name), "utf8");
@@ -99,9 +108,10 @@ test("observability snapshots run as a constrained root one-shot every thirty se
   assert.equal(value(observe, "Service", "PrivateTmp"), "true");
   assert.equal(value(observe, "Service", "ProtectHome"), "true");
   assert.equal(value(observe, "Service", "ProtectSystem"), "full");
-  assert.match(
-    value(observe, "Service", "ReadWritePaths"),
-    /\/var\/lib\/dialed\/observability\/textfile/,
+  assert.equal(
+    observe.get("Service")?.get("ReadWritePaths"),
+    undefined,
+    "the configured SSD path belongs in the generated drop-in",
   );
   assert.equal(value(timer, "Timer", "OnBootSec"), "30s");
   assert.equal(value(timer, "Timer", "OnUnitActiveSec"), "30s");
@@ -125,9 +135,12 @@ test("storage ingestion guard runs as a constrained root one-shot every five min
   assert.equal(value(guard, "Service", "PrivateTmp"), "true");
   assert.equal(value(guard, "Service", "ProtectHome"), "true");
   assert.equal(value(guard, "Service", "ProtectSystem"), "full");
-  assert.match(
-    value(guard, "Service", "ReadWritePaths"),
-    /\/var\/lib\/dialed\/observability/,
+  assert.equal(value(guard, "Service", "StandardError"), "journal");
+  assert.equal(value(guard, "Service", "SyslogLevel"), "crit");
+  assert.equal(
+    guard.get("Service")?.get("ReadWritePaths"),
+    undefined,
+    "the configured SSD path belongs in the generated drop-in",
   );
   assert.equal(value(timer, "Timer", "OnBootSec"), "2min");
   assert.equal(value(timer, "Timer", "OnUnitActiveSec"), "5min");
@@ -179,7 +192,11 @@ test("Alloy runs as a constrained loopback-only host collector", () => {
   assert.match(value(alloy, "Service", "ExecStart"), /127\.0\.0\.1:12345/);
   assert.match(
     value(alloy, "Service", "ExecStart"),
-    /--storage\.path=\/var\/lib\/dialed\/observability\/alloy/,
+    /--storage\.path=\/run\/dialed-observability\/alloy/,
+  );
+  assert.match(
+    value(alloy, "Service", "ExecStart"),
+    /\/opt\/dialed\/observability\/alloy\/config\.alloy$/,
   );
   assert.equal(value(alloy, "Service", "NoNewPrivileges"), "true");
   assert.equal(value(alloy, "Service", "PrivateTmp"), "true");
@@ -187,16 +204,162 @@ test("Alloy runs as a constrained loopback-only host collector", () => {
   assert.equal(value(alloy, "Service", "ProtectSystem"), "strict");
   assert.match(
     value(alloy, "Service", "ReadWritePaths"),
-    /\/var\/lib\/dialed\/observability\/alloy/,
+    /\/run\/dialed-observability\/alloy/,
   );
   assert.match(
     value(alloy, "Service", "ReadOnlyPaths"),
-    /\/var\/lib\/dialed\/observability\/textfile/,
+    /\/run\/dialed-observability\/textfile/,
   );
   assert.doesNotMatch(
     readUnit("dialed-poc-alloy.service"),
     /docker\.sock|SupplementaryGroups=docker/,
   );
+});
+
+test("installer renders one safe SSD path contract into each observability unit", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dialed-observability-units-"));
+  const unitRoot = join(root, "units");
+  const observability = join(root, "ssd", "observability");
+  mkdirSync(unitRoot, { recursive: true });
+  mkdirSync(join(observability, "alloy"), { recursive: true });
+  mkdirSync(join(observability, "textfile"));
+  chmodSync(observability, 0o700);
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const rendered = spawnSync("sh", [renderUnitsPath, unitRoot, observability], {
+    encoding: "utf8",
+  });
+  assert.equal(rendered.status, 0, rendered.stderr);
+
+  const alloy = readFileSync(
+    join(unitRoot, "dialed-poc-alloy.service.d", "observability-path.conf"),
+    "utf8",
+  );
+  const observe = readFileSync(
+    join(unitRoot, "dialed-poc-observe.service.d", "observability-path.conf"),
+    "utf8",
+  );
+  const guard = readFileSync(
+    join(
+      unitRoot,
+      "dialed-poc-storage-guard.service.d",
+      "observability-path.conf",
+    ),
+    "utf8",
+  );
+
+  assert.match(
+    alloy,
+    new RegExp(
+      `^BindPaths="${observability}/alloy:/run/dialed-observability/alloy"$`,
+      "m",
+    ),
+  );
+  assert.match(
+    alloy,
+    new RegExp(
+      `^BindReadOnlyPaths="${observability}/textfile:/run/dialed-observability/textfile"$`,
+      "m",
+    ),
+  );
+  assert.doesNotMatch(alloy, new RegExp(`${observability}:`));
+  for (const [source, writePath] of [
+    [observe, `${observability}/textfile`],
+    [guard, observability],
+  ]) {
+    assert.match(
+      source,
+      new RegExp(
+        `^Environment="DIALED_OBSERVABILITY_DIR=${observability}"$`,
+        "m",
+      ),
+    );
+    assert.match(source, new RegExp(`^ReadWritePaths="${writePath}"$`, "m"));
+  }
+
+  const installer = readInstaller();
+  const observeSource = readFileSync(join(pocRoot, "bin", "observe"), "utf8");
+  const renderCommand =
+    'sh "$POC_ROOT/bin/render-observability-units" /etc/systemd/system "$observability_path"';
+  assert.ok(compactShell(installer).includes(renderCommand));
+  const renderPosition = compactShell(installer).indexOf(renderCommand);
+  const verifyPosition = installer.indexOf("systemd-analyze verify");
+  const reloadPosition = installer.indexOf(
+    "systemctl daemon-reload",
+    verifyPosition,
+  );
+  assert.ok(renderPosition >= 0);
+  assert.ok(verifyPosition > renderPosition);
+  assert.ok(reloadPosition > verifyPosition);
+  assert.match(
+    observeSource,
+    /DIALED_OBSERVABILITY_DIR:\?DIALED_OBSERVABILITY_DIR is required/,
+  );
+});
+
+test("unit drop-in renderer rejects paths that cannot be encoded literally", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dialed-observability-paths-"));
+  const unitRoot = join(root, "units");
+  mkdirSync(unitRoot);
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  for (const unsafe of [
+    join(root, "space path"),
+    join(root, "colon:path"),
+    join(root, "percent%path"),
+    `${root}/dot/../path`,
+  ]) {
+    const result = spawnSync("sh", [renderUnitsPath, unitRoot, unsafe], {
+      encoding: "utf8",
+    });
+    assert.notEqual(result.status, 0, `${unsafe} was accepted`);
+  }
+});
+
+test("runtime-path sources stay aligned across installer, units, and collectors", () => {
+  const installer = readInstaller();
+  const alloy = readUnit("dialed-poc-alloy.service");
+  const config = readFileSync(
+    join(pocRoot, "observability", "alloy", "config.alloy"),
+    "utf8",
+  );
+  const observe = readFileSync(join(pocRoot, "bin", "observe"), "utf8");
+  const guard = readFileSync(join(pocRoot, "bin", "storage-guard"), "utf8");
+  const renderer = readFileSync(renderUnitsPath, "utf8");
+
+  assert.match(
+    installer,
+    /ensure_component_directory DIALED_OBSERVABILITY_DIR "\$observability_path" root root 0700/,
+  );
+  for (const child of [
+    'grafana "\$observability_path/grafana" 472 472 0700',
+    'loki "\$observability_path/loki" 10001 10001 0700',
+    'prometheus "\$observability_path/prometheus" 65534 65534 0700',
+    'alloy "\$observability_path/alloy" alloy alloy 0700',
+    'textfile "\$observability_path/textfile" root alloy 0750',
+  ]) {
+    assert.ok(installer.includes(child), child);
+  }
+  assert.match(alloy, /--storage\.path=\/run\/dialed-observability\/alloy/);
+  assert.match(alloy, /\/opt\/dialed\/observability\/alloy\/config\.alloy/);
+  assert.match(
+    config,
+    /directory\s*=\s*"\/run\/dialed-observability\/textfile"/,
+  );
+  assert.match(
+    renderer,
+    /observability_directory\/alloy:\/run\/dialed-observability\/alloy/,
+  );
+  assert.match(
+    renderer,
+    /observability_directory\/textfile:\/run\/dialed-observability\/textfile/,
+  );
+  assert.match(
+    observe,
+    /DIALED_OBSERVABILITY_DIR:\?DIALED_OBSERVABILITY_DIR is required/,
+  );
+  assert.match(guard, /load_poc_env/);
+  assert.match(guard, /DIALED_OBSERVABILITY_DIR/);
 });
 
 test("observability lifecycle is a Docker-ordered persistent one-shot", () => {
@@ -235,39 +398,40 @@ test("installer preserves operator secrets and validates before enabling timers"
   );
 });
 
-test("installer provisions the complete observability stack before dependency-ordered units", () => {
+test("installer secures validated core timers before optional observability work", () => {
   const source = readInstaller();
   const common = readCommon();
   const compactSource = compactShell(source);
-  const validators = [
-    'docker compose --env-file /etc/dialed/poc.env -f "$stage_directory/compose.poc.yaml" config --quiet',
-    'docker compose --env-file /etc/dialed/poc.env -f "$stage_directory/compose.observability.yaml" config --quiet',
-    '/usr/bin/alloy validate "$stage_directory/observability/alloy/config.alloy"',
-    'docker run --rm -v "$stage_directory/observability/loki.yaml:/etc/loki/config.yaml:ro" grafana/loki:3.7.6 -verify-config=true -config.file=/etc/loki/config.yaml',
-    'docker run --rm --entrypoint promtool -v "$stage_directory/observability/prometheus.yaml:/etc/prometheus/prometheus.yml:ro" prom/prometheus:v3.13.2 check config /etc/prometheus/prometheus.yml',
-  ];
-  const activeCopies = [
-    'install -o root -g root -m 0644 "$stage_directory/compose.poc.yaml" /opt/dialed/compose.poc.yaml',
-    'install -o root -g root -m 0644 "$stage_directory/compose.observability.yaml" /opt/dialed/compose.observability.yaml',
-    'install_configuration_tree "$stage_directory/observability" /opt/dialed/observability',
-    'install -o root -g root -m 0755 "$POC_ROOT/bin/$executable" "/opt/dialed/bin/$executable"',
-    'install -D -o root -g root -m 0644 "$library" "/opt/dialed/lib/$(basename "$library")"',
-    'install -o root -g root -m 0644 "$POC_ROOT/systemd/$unit" "/etc/systemd/system/$(basename "$unit")"',
-    'mv -f "$journald_stage" /etc/systemd/journald.conf.d/90-dialed-poc.conf',
-  ];
-  const enables = [
-    "systemctl enable --now dialed-poc-observability.service",
-    "systemctl enable --now dialed-poc-observe.timer",
-    "systemctl enable --now dialed-poc-storage-guard.timer",
-    "systemctl enable --now dialed-poc-alloy.service",
+  const coreValidator = compactSource.indexOf(
+    'docker compose --env-file /etc/dialed/poc.env -f "$core_stage/compose.poc.yaml" config --quiet',
+  );
+  const coreCopy = compactSource.indexOf(
+    'install -o root -g root -m 0644 "$core_stage/compose.poc.yaml" /opt/dialed/compose.poc.yaml',
+  );
+  const deployEnable = compactSource.indexOf(
     "systemctl enable --now dialed-poc-deploy.timer",
+  );
+  const backupEnable = compactSource.indexOf(
     "systemctl enable --now dialed-poc-backup.timer",
-  ];
+  );
+  const observabilityPull = compactSource.indexOf(
+    "docker pull grafana/grafana:13.1.3",
+  );
+  const observabilityValidator = compactSource.indexOf(
+    'docker compose --env-file /etc/dialed/poc.env -f "$observability_stage/compose.observability.yaml" config --quiet',
+  );
+  const observabilityCopy = compactSource.indexOf(
+    'install -o root -g root -m 0644 "$observability_stage/compose.observability.yaml" /opt/dialed/compose.observability.yaml',
+  );
+  const observabilityEnable = compactSource.indexOf(
+    "systemctl enable --now dialed-poc-observability.service",
+  );
 
   assert.match(source, /require_command curl/);
   assert.match(source, /alloy --version/);
   assert.match(source, /require_alloy_version/);
   assert.match(source, /validate_observability_environment/);
+  assert.match(source, /run_installation_phases/);
   assert.match(common, /1\.19\.0/);
   assert.match(common, /DIALED_OBSERVABILITY_DIR/);
   assert.match(common, /GRAFANA_ADMIN_USER/);
@@ -281,43 +445,32 @@ test("installer provisions the complete observability stack before dependency-or
   assert.match(source, /textfile.*root alloy 0750/s);
   assert.match(source, /operations.*root root 0700/s);
   assert.match(source, /90-dialed-poc\.conf/);
-  const validatorPositions = validators.map((command) =>
-    compactSource.indexOf(command),
-  );
-  const activeCopyPositions = activeCopies.map((command) =>
-    compactSource.indexOf(command),
-  );
-  const enablePositions = enables.map((command) =>
-    compactSource.indexOf(command),
-  );
-  for (const [index, position] of validatorPositions.entries()) {
-    assert.ok(position >= 0, `missing validator: ${validators[index]}`);
+  for (const position of [
+    coreValidator,
+    coreCopy,
+    deployEnable,
+    backupEnable,
+    observabilityPull,
+    observabilityValidator,
+    observabilityCopy,
+    observabilityEnable,
+  ]) {
+    assert.ok(position >= 0);
   }
-  for (const [index, position] of activeCopyPositions.entries()) {
-    assert.ok(position >= 0, `missing active copy: ${activeCopies[index]}`);
-  }
-  for (const [index, position] of enablePositions.entries()) {
-    assert.ok(position >= 0, `missing enablement: ${enables[index]}`);
-  }
-  for (let index = 1; index < validatorPositions.length; index += 1) {
-    assert.ok(validatorPositions[index - 1] < validatorPositions[index]);
-  }
-  const firstActiveCopy = Math.min(...activeCopyPositions);
-  const firstEnablement = enablePositions[0];
-  for (const position of validatorPositions) {
-    assert.ok(position < firstActiveCopy);
-    assert.ok(position < firstEnablement);
-  }
-  assert.ok(Math.max(...activeCopyPositions) < firstEnablement);
-  for (let index = 1; index < enablePositions.length; index += 1) {
-    assert.ok(enablePositions[index - 1] < enablePositions[index]);
-  }
+  assert.ok(coreValidator < coreCopy);
+  assert.ok(coreCopy < deployEnable);
+  assert.ok(deployEnable < backupEnable);
+  assert.ok(backupEnable < observabilityPull);
+  assert.ok(observabilityPull < observabilityValidator);
+  assert.ok(observabilityValidator < observabilityCopy);
+  assert.ok(observabilityCopy < observabilityEnable);
+  assert.doesNotMatch(source, /docker compose[^\n]*(?:down|stop|up|create)/);
   assert.doesNotMatch(source, /chown\s+-R|chown\s+--recursive/);
 });
 
 test("staged Compose validation uses a full digest placeholder", () => {
   const source = readInstaller();
-  const match = source.match(/^zero_digest=([^\n]+)$/m);
+  const match = source.match(/^\s*zero_digest=([^\n]+)$/m);
 
   assert.ok(match);
   assert.equal(match[1].length, 64);

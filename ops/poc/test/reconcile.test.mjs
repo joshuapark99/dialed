@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 
 const repositoryRoot = resolve(
@@ -59,6 +59,7 @@ function fixture(t, { active = true } = {}) {
   const activeState = join(state, "active.env");
   const rollbackState = join(state, "rollback.env");
   const dockerLog = join(root, "docker.log");
+  const recordLog = join(root, "record-operation.log");
   const recorder = join(bin, "record-operation");
   mkdirSync(bin);
   mkdirSync(state);
@@ -102,7 +103,13 @@ command_line="$*"
 printf '%s\n' "$command_line" >> "$FAKE_DOCKER_LOG"
 
 case "$command_line" in
-  "pull "*) exit 0 ;;
+  "pull "*)
+    if [ "$FAKE_MODE" = "signal-block" ]; then
+      : > "$FAKE_BLOCK_READY"
+      sleep 0.2
+    fi
+    exit 0
+    ;;
   *"image inspect"*"RepoDigests"*"dialed-web:poc"*) printf '%s\n' "$FAKE_WEB_IMAGE"; exit 0 ;;
   *"image inspect"*"RepoDigests"*"dialed-api:poc"*) printf '%s\n' "$FAKE_API_IMAGE"; exit 0 ;;
   *"image inspect"*"org.opencontainers.image.revision"*"dialed-web@sha256:"*) printf '%s\n' "$FAKE_WEB_REVISION"; exit 0 ;;
@@ -146,6 +153,7 @@ exit 99
   writeFileSync(
     recorder,
     `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_RECORD_LOG"
 [ "$FAKE_RECORD_MODE" = fail ] && exit 72
 `,
   );
@@ -163,6 +171,7 @@ exit 99
     rollbackState,
     operations,
     dockerLog,
+    recordLog,
     recorder,
   };
 }
@@ -170,34 +179,90 @@ exit 99
 function runReconcile(value, overrides = {}, arguments_ = []) {
   return spawnSync("sh", [reconcilePath, ...arguments_], {
     encoding: "utf8",
-    env: {
-      ...process.env,
-      PATH: `${value.bin}:${process.env.PATH}`,
-      DIALED_ENV_FILE: value.environmentFile,
-      DIALED_COMPOSE_FILE: value.composeFile,
-      DIALED_STATE_DIR: value.state,
-      DIALED_ACTIVE_STATE: value.activeState,
-      DIALED_ROLLBACK_STATE: value.rollbackState,
-      DIALED_RECORD_OPERATION: value.recorder,
-      DIALED_LOCK_FILE: join(value.root, "deploy.lock"),
-      DIALED_HEALTH_TIMEOUT_SECONDS: "0",
-      DIALED_HEALTH_INTERVAL_SECONDS: "0",
-      FAKE_DOCKER_LOG: value.dockerLog,
-      FAKE_MODE: "success",
-      FAKE_WEB_IMAGE: webCandidate,
-      FAKE_API_IMAGE: apiCandidate,
-      FAKE_WEB_REVISION: candidateRevision,
-      FAKE_API_REVISION: candidateRevision,
-      FAKE_PRIOR_REVISION: priorRevision,
-      FAKE_WEB_PRIOR: webPrior,
-      FAKE_API_PRIOR: apiPrior,
-      FAKE_WEB_EXPIRED: webExpired,
-      FAKE_API_EXPIRED: apiExpired,
-      FAKE_RECORD_MODE: "success",
-      ...overrides,
-    },
+    env: reconcileEnvironment(value, overrides),
   });
 }
+
+function reconcileEnvironment(value, overrides = {}) {
+  return {
+    ...process.env,
+    PATH: `${value.bin}:${process.env.PATH}`,
+    DIALED_ENV_FILE: value.environmentFile,
+    DIALED_COMPOSE_FILE: value.composeFile,
+    DIALED_STATE_DIR: value.state,
+    DIALED_ACTIVE_STATE: value.activeState,
+    DIALED_ROLLBACK_STATE: value.rollbackState,
+    DIALED_RECORD_OPERATION: value.recorder,
+    DIALED_LOCK_FILE: join(value.root, "deploy.lock"),
+    DIALED_HEALTH_TIMEOUT_SECONDS: "0",
+    DIALED_HEALTH_INTERVAL_SECONDS: "0",
+    FAKE_DOCKER_LOG: value.dockerLog,
+    FAKE_MODE: "success",
+    FAKE_WEB_IMAGE: webCandidate,
+    FAKE_API_IMAGE: apiCandidate,
+    FAKE_WEB_REVISION: candidateRevision,
+    FAKE_API_REVISION: candidateRevision,
+    FAKE_PRIOR_REVISION: priorRevision,
+    FAKE_WEB_PRIOR: webPrior,
+    FAKE_API_PRIOR: apiPrior,
+    FAKE_WEB_EXPIRED: webExpired,
+    FAKE_API_EXPIRED: apiExpired,
+    FAKE_RECORD_LOG: value.recordLog,
+    FAKE_RECORD_MODE: "success",
+    FAKE_BLOCK_READY: join(value.root, "block.ready"),
+    ...overrides,
+  };
+}
+
+async function waitForFile(path, child) {
+  const deadline = Date.now() + 2_000;
+  while (!existsSync(path)) {
+    if (child.exitCode !== null)
+      throw new Error(`child exited ${child.exitCode}`);
+    if (Date.now() >= deadline)
+      throw new Error(`timed out waiting for ${path}`);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+}
+
+async function signalReconcile(value, signal) {
+  const ready = join(value.root, "block.ready");
+  const child = spawn("sh", [reconcilePath], {
+    env: reconcileEnvironment(value, { FAKE_MODE: "signal-block" }),
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  await waitForFile(ready, child);
+  child.kill(signal);
+  return new Promise((resolvePromise, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, closeSignal) =>
+      resolvePromise({ code, signal: closeSignal, stderr }),
+    );
+  });
+}
+
+test("HUP, INT, and TERM preserve reconcile failure statuses", async (t) => {
+  for (const [signal, expectedStatus] of [
+    ["SIGHUP", 129],
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ]) {
+    const value = fixture(t);
+    const result = await signalReconcile(value, signal);
+
+    assert.equal(result.signal, null, signal);
+    assert.equal(result.code, expectedStatus, `${signal}: ${result.stderr}`);
+    assert.equal(
+      readFileSync(value.recordLog, "utf8").trim(),
+      "deploy failure 0000000000000000000000000000000000000000 release",
+      signal,
+    );
+  }
+});
 
 function dockerLog(value) {
   return existsSync(value.dockerLog)

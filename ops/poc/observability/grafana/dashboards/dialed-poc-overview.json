@@ -39,24 +39,104 @@
       "datasource": { "type": "prometheus", "uid": "dialed-prometheus" },
       "fieldConfig": {
         "defaults": {
-          "mappings": [
-            {
-              "options": {
-                "0": { "color": "red", "text": "Unhealthy" },
-                "1": { "color": "green", "text": "Healthy" }
-              },
-              "type": "value"
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "A" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": { "1": { "color": "green", "text": "Healthy" } },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": { "1": { "color": "red", "text": "Unhealthy" } },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byFrameRefID", "options": "C" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "1": { "color": "yellow", "text": "Starting" }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byFrameRefID", "options": "D" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "1": { "color": "gray", "text": "No health check" }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byFrameRefID", "options": "E" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "0": { "color": "red", "text": "Stopped" },
+                      "1": { "color": "green", "text": "Running" }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byFrameRefID", "options": "F" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "0": { "color": "red", "text": "Endpoint down" },
+                      "1": { "color": "green", "text": "Ready" }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
             ]
           }
-        },
-        "overrides": []
+        ]
       },
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
       "options": {
@@ -72,9 +152,36 @@
         "textMode": "auto"
       },
       "targets": [
-        { "expr": "dialed_container_health_status", "refId": "A" },
-        { "expr": "dialed_container_running", "refId": "B" },
-        { "expr": "dialed_observability_endpoint_up", "refId": "C" }
+        {
+          "expr": "dialed_container_health_status{status=\"healthy\"}",
+          "legendFormat": "{{stack}} / {{service}} / healthy",
+          "refId": "A"
+        },
+        {
+          "expr": "dialed_container_health_status{status=\"unhealthy\"}",
+          "legendFormat": "{{stack}} / {{service}} / unhealthy",
+          "refId": "B"
+        },
+        {
+          "expr": "dialed_container_health_status{status=\"starting\"}",
+          "legendFormat": "{{stack}} / {{service}} / starting",
+          "refId": "C"
+        },
+        {
+          "expr": "dialed_container_health_status{status=\"none\"}",
+          "legendFormat": "{{stack}} / {{service}} / no health check",
+          "refId": "D"
+        },
+        {
+          "expr": "dialed_container_running",
+          "legendFormat": "{{stack}} / {{service}} / running",
+          "refId": "E"
+        },
+        {
+          "expr": "dialed_observability_endpoint_up",
+          "legendFormat": "observability / {{service}} / ready",
+          "refId": "F"
+        }
       ],
       "title": "Service health",
       "type": "stat"
@@ -156,7 +263,7 @@
           "refId": "A"
         },
         {
-          "expr": "dialed_operation_last_result{operation=\"deployment\",result=\"failed\"}",
+          "expr": "dialed_operation_last_result{operation=\"deployment\",result=\"failure\"}",
           "refId": "B"
         }
       ],
@@ -208,7 +315,7 @@
           "refId": "A"
         },
         {
-          "expr": "dialed_operation_last_result{operation=\"backup\",result=\"failed\"}",
+          "expr": "dialed_operation_last_result{operation=\"backup\",result=\"failure\"}",
           "refId": "B"
         }
       ],
@@ -422,7 +529,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate({service=\"api\"} | json | msg=\"request completed\" [5m]))",
+          "expr": "sum(rate({environment=\"poc\", service=\"api\", revision=~\"$revision\"} | json | msg=\"request completed\" [5m]))",
           "refId": "A"
         }
       ],
@@ -446,7 +553,7 @@
       },
       "targets": [
         {
-          "expr": "quantile_over_time(0.95, {service=\"api\"} | json | msg=\"request completed\" | unwrap responseTime [5m])",
+          "expr": "quantile_over_time(0.95, {environment=\"poc\", service=\"api\", revision=~\"$revision\"} | json | msg=\"request completed\" | unwrap responseTime [5m])",
           "refId": "A"
         }
       ],
@@ -465,7 +572,7 @@
         },
         "overrides": [
           {
-            "matcher": { "id": "byRegexp", "options": "5.." },
+            "matcher": { "id": "byFrameRefID", "options": "D" },
             "properties": [
               {
                 "id": "thresholds",
@@ -492,8 +599,24 @@
       },
       "targets": [
         {
-          "expr": "sum by (statusCode) (count_over_time({service=\"api\"} | json | msg=\"request completed\" [5m]))",
+          "expr": "sum(count_over_time({environment=\"poc\", service=\"api\", revision=~\"$revision\"} | json | msg=\"request completed\" | statusCode=~\"2..\" [5m]))",
+          "legendFormat": "2xx",
           "refId": "A"
+        },
+        {
+          "expr": "sum(count_over_time({environment=\"poc\", service=\"api\", revision=~\"$revision\"} | json | msg=\"request completed\" | statusCode=~\"3..\" [5m]))",
+          "legendFormat": "3xx",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(count_over_time({environment=\"poc\", service=\"api\", revision=~\"$revision\"} | json | msg=\"request completed\" | statusCode=~\"4..\" [5m]))",
+          "legendFormat": "4xx",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(count_over_time({environment=\"poc\", service=\"api\", revision=~\"$revision\"} | json | msg=\"request completed\" | statusCode=~\"5..\" [5m]))",
+          "legendFormat": "5xx",
+          "refId": "D"
         }
       ],
       "title": "API status classes",
@@ -556,8 +679,34 @@
         "label": "Service",
         "multi": false,
         "name": "service",
-        "options": [{ "selected": true, "text": "api", "value": "api" }],
-        "query": "api",
+        "options": [
+          { "selected": false, "text": "alloy", "value": "alloy" },
+          { "selected": true, "text": "api", "value": "api" },
+          { "selected": false, "text": "backup", "value": "backup" },
+          {
+            "selected": false,
+            "text": "cloudflared",
+            "value": "cloudflared"
+          },
+          { "selected": false, "text": "deploy", "value": "deploy" },
+          { "selected": false, "text": "grafana", "value": "grafana" },
+          { "selected": false, "text": "loki", "value": "loki" },
+          { "selected": false, "text": "migrate", "value": "migrate" },
+          { "selected": false, "text": "observe", "value": "observe" },
+          { "selected": false, "text": "postgres", "value": "postgres" },
+          {
+            "selected": false,
+            "text": "prometheus",
+            "value": "prometheus"
+          },
+          {
+            "selected": false,
+            "text": "storage-guard",
+            "value": "storage-guard"
+          },
+          { "selected": false, "text": "web", "value": "web" }
+        ],
+        "query": "alloy,api,backup,cloudflared,deploy,grafana,loki,migrate,observe,postgres,prometheus,storage-guard,web",
         "type": "custom"
       },
       {
@@ -577,17 +726,20 @@
         "type": "custom"
       },
       {
-        "current": { "selected": true, "text": "current", "value": "current" },
-        "hide": 2,
-        "includeAll": false,
+        "allValue": "[0-9a-f]{40}",
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "loki", "uid": "dialed-loki" },
+        "definition": "label_values({environment=\"poc\",service=\"api\"}, revision)",
+        "hide": 0,
+        "includeAll": true,
         "label": "Revision",
         "multi": false,
         "name": "revision",
-        "options": [
-          { "selected": true, "text": "current", "value": "current" }
-        ],
-        "query": "current",
-        "type": "custom"
+        "options": [],
+        "query": "label_values({environment=\"poc\",service=\"api\"}, revision)",
+        "refresh": 1,
+        "sort": 1,
+        "type": "query"
       }
     ]
   },

@@ -15,6 +15,20 @@ require_absolute_path() {
   esac
 }
 
+require_systemd_literal_path() {
+  path_name=$1
+  path_value=$2
+  require_absolute_path "$path_name" "$path_value"
+  case "$path_value" in
+    *[!A-Za-z0-9_./-]*)
+      die "$path_name contains characters that cannot be encoded safely in a systemd unit"
+      ;;
+  esac
+  canonical_path=$(realpath -m -- "$path_value")
+  [ "$canonical_path" = "$path_value" ] ||
+    die "$path_name must be canonical and must not traverse symbolic links"
+}
+
 require_value() {
   value_name=$1
   value_value=$2
@@ -66,11 +80,26 @@ require_grafana_admin_user() {
   esac
 }
 
-validate_observability_environment() {
+validate_core_storage_environment() {
   command -v realpath >/dev/null 2>&1 || die "realpath is required"
   for required_name in \
     DIALED_DATA_DIR \
-    DIALED_BACKUP_DIR \
+    DIALED_BACKUP_DIR; do
+    eval "required_value=\${$required_name:-}"
+    require_value "$required_name" "$required_value"
+  done
+  require_absolute_path DIALED_DATA_DIR "$DIALED_DATA_DIR"
+  require_absolute_path DIALED_BACKUP_DIR "$DIALED_BACKUP_DIR"
+  data_path=$(realpath -m -- "$DIALED_DATA_DIR")
+  backup_path=$(realpath -m -- "$DIALED_BACKUP_DIR")
+  require_dedicated_storage_path DIALED_DATA_DIR "$data_path"
+  require_dedicated_storage_path DIALED_BACKUP_DIR "$backup_path"
+  require_disjoint_paths DIALED_DATA_DIR "$data_path" DIALED_BACKUP_DIR "$backup_path"
+}
+
+validate_observability_environment() {
+  validate_core_storage_environment
+  for required_name in \
     DIALED_OBSERVABILITY_DIR \
     GRAFANA_ADMIN_USER \
     GRAFANA_ADMIN_PASSWORD \
@@ -86,16 +115,9 @@ validate_observability_environment() {
   require_positive_decimal DIALED_OBSERVABILITY_MAX_BYTES "$DIALED_OBSERVABILITY_MAX_BYTES"
   require_positive_decimal DIALED_OBSERVABILITY_MIN_FREE_BYTES "$DIALED_OBSERVABILITY_MIN_FREE_BYTES"
 
-  require_absolute_path DIALED_DATA_DIR "$DIALED_DATA_DIR"
-  require_absolute_path DIALED_BACKUP_DIR "$DIALED_BACKUP_DIR"
-  require_absolute_path DIALED_OBSERVABILITY_DIR "$DIALED_OBSERVABILITY_DIR"
-  data_path=$(realpath -m -- "$DIALED_DATA_DIR")
-  backup_path=$(realpath -m -- "$DIALED_BACKUP_DIR")
+  require_systemd_literal_path DIALED_OBSERVABILITY_DIR "$DIALED_OBSERVABILITY_DIR"
   observability_path=$(realpath -m -- "$DIALED_OBSERVABILITY_DIR")
-  require_dedicated_storage_path DIALED_DATA_DIR "$data_path"
-  require_dedicated_storage_path DIALED_BACKUP_DIR "$backup_path"
   require_dedicated_storage_path DIALED_OBSERVABILITY_DIR "$observability_path"
-  require_disjoint_paths DIALED_DATA_DIR "$data_path" DIALED_BACKUP_DIR "$backup_path"
   require_disjoint_paths DIALED_DATA_DIR "$data_path" DIALED_OBSERVABILITY_DIR "$observability_path"
   require_disjoint_paths DIALED_BACKUP_DIR "$backup_path" DIALED_OBSERVABILITY_DIR "$observability_path"
 }

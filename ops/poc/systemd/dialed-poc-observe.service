@@ -16,6 +16,5 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
-ReadWritePaths=/var/lib/dialed/observability/textfile
 ReadOnlyPaths=/var/lib/dialed /run/systemd/private /var/run/docker.sock
 TimeoutStartSec=30s

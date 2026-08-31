@@ -10,7 +10,8 @@ poc_services='postgres api web cloudflared'
 observability_services='grafana loki prometheus'
 state_directory=${DIALED_STATE_DIR:-/var/lib/dialed}
 active_state=${DIALED_ACTIVE_STATE:-$state_directory/active.env}
-observability_directory=${DIALED_OBSERVABILITY_DIR:-/var/lib/dialed/observability}
+: "${DIALED_OBSERVABILITY_DIR:?DIALED_OBSERVABILITY_DIR is required}"
+observability_directory=$DIALED_OBSERVABILITY_DIR
 textfile_directory=$observability_directory/textfile
 destination=$textfile_directory/dialed.prom
 operation_directory=${DIALED_OPERATIONS_DIR:-$state_directory/operations}
@@ -134,11 +135,13 @@ emit_operation() {
     fi
     printf 'dialed_observability_endpoint_up{service="%s"} %s\n' "$service" "$up"
   done
-  systemctl show --property=ActiveState --value dialed-poc-storage-guard.service >/dev/null 2>&1 || true
-  if [ -e "$sentinel" ]; then
-    stopped=1
-  else
-    stopped=0
+  stopped=0
+  if [ -f "$sentinel" ] && [ ! -L "$sentinel" ]; then
+    if alloy_state=$(systemctl show --property=ActiveState --value dialed-poc-alloy.service 2>/dev/null); then
+      case "$alloy_state" in
+        inactive | failed) stopped=1 ;;
+      esac
+    fi
   fi
   printf 'dialed_observability_ingestion_stopped %s\n' "$stopped"
 } >"$temporary"

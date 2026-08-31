@@ -1,0 +1,74 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=common
+. "$SCRIPT_DIR/common"
+
+[ "$#" -eq 2 ] || die "usage: render-observability-units UNIT_ROOT OBSERVABILITY_DIR"
+unit_root=$1
+observability_directory=$2
+
+require_systemd_literal_path UNIT_ROOT "$unit_root"
+require_systemd_literal_path DIALED_OBSERVABILITY_DIR "$observability_directory"
+[ -d "$unit_root" ] && [ ! -L "$unit_root" ] ||
+  die "$unit_root must be an existing non-symbolic-link directory"
+[ -d "$observability_directory" ] && [ ! -L "$observability_directory" ] ||
+  die "$observability_directory must be an existing non-symbolic-link directory"
+
+temporary=
+cleanup() {
+  [ -z "$temporary" ] || rm -f -- "$temporary"
+}
+trap cleanup 0 1 2 15
+
+ensure_dropin_directory() {
+  dropin_directory=$1
+  if [ -e "$dropin_directory" ]; then
+    [ -d "$dropin_directory" ] && [ ! -L "$dropin_directory" ] ||
+      die "$dropin_directory must be a non-symbolic-link directory"
+  else
+    install -d -m 0755 "$dropin_directory"
+  fi
+}
+
+write_dropin() {
+  unit_name=$1
+  dropin_kind=$2
+  dropin_directory=$unit_root/$unit_name.d
+  ensure_dropin_directory "$dropin_directory"
+  temporary=$(mktemp "$dropin_directory/.observability-path.conf.XXXXXX")
+  case "$dropin_kind" in
+    alloy)
+      printf '%s\n' \
+        '[Service]' \
+        "BindPaths=\"$observability_directory/alloy:/run/dialed-observability/alloy\"" \
+        "BindReadOnlyPaths=\"$observability_directory/textfile:/run/dialed-observability/textfile\"" \
+        >"$temporary"
+      ;;
+    observe)
+      printf '%s\n' \
+        '[Service]' \
+        "Environment=\"DIALED_OBSERVABILITY_DIR=$observability_directory\"" \
+        "ReadWritePaths=\"$observability_directory/textfile\"" \
+        >"$temporary"
+      ;;
+    guard)
+      printf '%s\n' \
+        '[Service]' \
+        "Environment=\"DIALED_OBSERVABILITY_DIR=$observability_directory\"" \
+        "ReadWritePaths=\"$observability_directory\"" \
+        >"$temporary"
+      ;;
+    *) die "unknown drop-in kind: $dropin_kind" ;;
+  esac
+  chmod 0644 "$temporary"
+  mv -f "$temporary" "$dropin_directory/observability-path.conf"
+  temporary=
+}
+
+write_dropin dialed-poc-alloy.service alloy
+write_dropin dialed-poc-observe.service observe
+write_dropin dialed-poc-storage-guard.service guard
+
+trap - 0 1 2 15

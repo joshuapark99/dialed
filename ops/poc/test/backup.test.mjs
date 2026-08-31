@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -11,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 
 const repositoryRoot = resolve(
@@ -71,6 +72,11 @@ case "$FAKE_DOCKER_MODE" in
   fail) exit 23 ;;
   empty) exit 0 ;;
   success) printf '%s' "$FAKE_DUMP_CONTENT" ;;
+  signal-block)
+    : > "$FAKE_BLOCK_READY"
+    sleep 0.2
+    printf '%s' "$FAKE_DUMP_CONTENT"
+    ;;
   *) exit 24 ;;
 esac
 `,
@@ -108,25 +114,80 @@ printf '%s\\n' "$*" >> "$FAKE_RECORD_LOG"
 function runBackup(fixtureValue, mode, reason = "scheduled", overrides = {}) {
   return spawnSync("sh", [backupPath, reason], {
     encoding: "utf8",
-    env: {
-      ...process.env,
-      PATH: `${fixtureValue.bin}:${process.env.PATH}`,
-      DIALED_ENV_FILE: fixtureValue.environmentFile,
-      DIALED_ACTIVE_STATE: fixtureValue.activeState,
-      DIALED_STATE_DIR: fixtureValue.root,
-      DIALED_LOCK_FILE: join(fixtureValue.root, "deploy.lock"),
-      DIALED_COMPOSE_FILE: fixtureValue.composeFile,
-      DIALED_RECORD_OPERATION: fixtureValue.recorder,
-      FAKE_DOCKER_LOG: fixtureValue.dockerLog,
-      FAKE_DOCKER_MODE: mode,
-      FAKE_DUMP_CONTENT: "verified custom-format dump",
-      FAKE_DATE: "20260829T031500Z",
-      FAKE_RECORD_LOG: fixtureValue.recordLog,
-      FAKE_RECORD_MODE: "success",
-      ...overrides,
-    },
+    env: backupEnvironment(fixtureValue, mode, overrides),
   });
 }
+
+function backupEnvironment(fixtureValue, mode, overrides = {}) {
+  return {
+    ...process.env,
+    PATH: `${fixtureValue.bin}:${process.env.PATH}`,
+    DIALED_ENV_FILE: fixtureValue.environmentFile,
+    DIALED_ACTIVE_STATE: fixtureValue.activeState,
+    DIALED_STATE_DIR: fixtureValue.root,
+    DIALED_LOCK_FILE: join(fixtureValue.root, "deploy.lock"),
+    DIALED_COMPOSE_FILE: fixtureValue.composeFile,
+    DIALED_RECORD_OPERATION: fixtureValue.recorder,
+    FAKE_DOCKER_LOG: fixtureValue.dockerLog,
+    FAKE_DOCKER_MODE: mode,
+    FAKE_DUMP_CONTENT: "verified custom-format dump",
+    FAKE_DATE: "20260829T031500Z",
+    FAKE_RECORD_LOG: fixtureValue.recordLog,
+    FAKE_RECORD_MODE: "success",
+    FAKE_BLOCK_READY: join(fixtureValue.root, "block.ready"),
+    ...overrides,
+  };
+}
+
+async function waitForFile(path, child) {
+  const deadline = Date.now() + 2_000;
+  while (!existsSync(path)) {
+    if (child.exitCode !== null)
+      throw new Error(`child exited ${child.exitCode}`);
+    if (Date.now() >= deadline)
+      throw new Error(`timed out waiting for ${path}`);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+}
+
+async function signalBackup(fixtureValue, signal) {
+  const ready = join(fixtureValue.root, "block.ready");
+  const child = spawn("sh", [backupPath, "scheduled"], {
+    env: backupEnvironment(fixtureValue, "signal-block"),
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  await waitForFile(ready, child);
+  child.kill(signal);
+  return new Promise((resolvePromise, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, closeSignal) =>
+      resolvePromise({ code, signal: closeSignal, stderr }),
+    );
+  });
+}
+
+test("HUP, INT, and TERM preserve signal-derived failure statuses", async (t) => {
+  for (const [signal, expectedStatus] of [
+    ["SIGHUP", 129],
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ]) {
+    const value = fixture(t);
+    const result = await signalBackup(value, signal);
+
+    assert.equal(result.signal, null, signal);
+    assert.equal(result.code, expectedStatus, `${signal}: ${result.stderr}`);
+    assert.equal(
+      readFileSync(value.recordLog, "utf8").trim(),
+      "backup failure 0123456789abcdef0123456789abcdef01234567 scheduled",
+      signal,
+    );
+  }
+});
 
 test("a failed pg_dump leaves no archive or temporary file", (t) => {
   const value = fixture(t);

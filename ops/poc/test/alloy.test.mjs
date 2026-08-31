@@ -14,6 +14,39 @@ function relabelRules(config) {
   );
 }
 
+function ruleSetting(rule, name) {
+  return rule.match(new RegExp(`^\\s*${name}\\s*=\\s*"([^"]*)"`, "m"))?.[1];
+}
+
+function priorityMappings(config) {
+  const mappings = [];
+  for (const rule of relabelRules(config)) {
+    if (!rule.includes("__journal_priority_keyword")) continue;
+    const regex = ruleSetting(rule, "regex");
+    const replacement = ruleSetting(rule, "replacement");
+    if (regex && replacement) mappings.push({ regex, replacement });
+  }
+  return mappings;
+}
+
+function pinoMappings(config) {
+  const mappings = new Map();
+  const selectors = [
+    ...config.matchAll(/selector\s*=\s*"\{pino_level=~\\"\(([^)]*)\)\\"\}"/g),
+  ];
+  for (const [index, selector] of selectors.entries()) {
+    const start = selector.index + selector[0].length;
+    const end = selectors[index + 1]?.index ?? config.length;
+    const segment = config.slice(start, end);
+    const normalized = segment.match(
+      /level\s*=\s*"(debug|info|warn|error)"/,
+    )?.[1];
+    assert.ok(normalized, `missing normalized level after ${selector[1]}`);
+    for (const value of selector[1].split("|")) mappings.set(value, normalized);
+  }
+  return mappings;
+}
+
 test("Alloy collects only allowlisted journal streams with low-cardinality labels", () => {
   const config = readConfig();
   const rules = relabelRules(config);
@@ -95,10 +128,60 @@ test("Alloy collects only allowlisted journal streams with low-cardinality label
   );
   assert.ok(
     config.includes(
-      'selector            = "{service=~\\"(grafana|loki|prometheus|alloy)\\", level=~\\"(20|30|debug|info)\\"}"',
+      'selector            = "{service=~\\"(grafana|loki|prometheus|alloy)\\", level=~\\"(debug|info)\\"}"',
     ),
   );
   assert.match(config, /http:\/\/127\.0\.0\.1:3100\/loki\/api\/v1\/push/);
+});
+
+test("Alloy normalizes bounded Pino and journald levels with validated revision metadata", () => {
+  const config = readConfig();
+  const journalMappings = priorityMappings(config);
+  const pino = pinoMappings(config);
+
+  for (const [input, expected] of Object.entries({
+    emerg: "error",
+    alert: "error",
+    crit: "error",
+    err: "error",
+    error: "error",
+    warning: "warn",
+    warn: "warn",
+    notice: "info",
+    info: "info",
+    debug: "debug",
+  })) {
+    const mapping = journalMappings.find(({ regex }) =>
+      new RegExp(regex).test(input),
+    );
+    assert.equal(mapping?.replacement, expected, input);
+  }
+
+  for (const [input, expected] of Object.entries({
+    10: "debug",
+    20: "debug",
+    30: "info",
+    40: "warn",
+    50: "error",
+    60: "error",
+  })) {
+    assert.equal(pino.get(input), expected, `Pino ${input}`);
+  }
+
+  assert.match(
+    config,
+    /source_labels\s*=\s*\["__journal_io_dialed_revision"\]/,
+  );
+  assert.match(config, /regex\s*=\s*"\(\[0-9a-f\]\{40\}\)"/);
+  assert.match(config, /target_label\s*=\s*"revision"/);
+  assert.match(
+    config,
+    /stage\.label_keep\s*\{\s*values\s*=\s*\["level", "service", "environment", "revision"\]/,
+  );
+  assert.doesNotMatch(
+    config,
+    /target_label\s*=\s*"(?:requestId|rawUrl|containerId|user|path|error)"/,
+  );
 });
 
 test("Alloy exports bounded host and textfile metrics to local Prometheus", () => {
@@ -135,7 +218,7 @@ test("Alloy exports bounded host and textfile metrics to local Prometheus", () =
   }
   assert.match(
     config,
-    /directory\s*=\s*"\/var\/lib\/dialed\/observability\/textfile"/,
+    /directory\s*=\s*"\/run\/dialed-observability\/textfile"/,
   );
   assert.match(config, /fs_types_exclude\s*=/);
   assert.match(config, /mount_points_exclude\s*=\s*"[^"\n]*overlay[^"\n]*"/);

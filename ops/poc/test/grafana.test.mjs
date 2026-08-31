@@ -8,6 +8,9 @@ const dashboardProviderPath =
   "ops/poc/observability/grafana/provisioning/dashboards/dialed.yaml";
 const dashboardPath =
   "ops/poc/observability/grafana/dashboards/dialed-poc-overview.json";
+const observePath = "ops/poc/bin/observe";
+const backupPath = "ops/poc/bin/backup";
+const reconcilePath = "ops/poc/bin/reconcile";
 
 const requiredPanels = [
   "Active revision",
@@ -42,9 +45,12 @@ const requiredPrometheusQueries = [
 ];
 
 const requiredLokiQueries = [
-  'sum(rate({service="api"} | json | msg="request completed" [5m]))',
-  'quantile_over_time(0.95, {service="api"} | json | msg="request completed" | unwrap responseTime [5m])',
-  'sum by (statusCode) (count_over_time({service="api"} | json | msg="request completed" [5m]))',
+  'sum(rate({environment="poc", service="api", revision=~"$revision"} | json | msg="request completed" [5m]))',
+  'quantile_over_time(0.95, {environment="poc", service="api", revision=~"$revision"} | json | msg="request completed" | unwrap responseTime [5m])',
+  'sum(count_over_time({environment="poc", service="api", revision=~"$revision"} | json | msg="request completed" | statusCode=~"2.." [5m]))',
+  'sum(count_over_time({environment="poc", service="api", revision=~"$revision"} | json | msg="request completed" | statusCode=~"3.." [5m]))',
+  'sum(count_over_time({environment="poc", service="api", revision=~"$revision"} | json | msg="request completed" | statusCode=~"4.." [5m]))',
+  'sum(count_over_time({environment="poc", service="api", revision=~"$revision"} | json | msg="request completed" | statusCode=~"5.." [5m]))',
   '{environment="poc", service=~"$service", level=~"$level"}',
 ];
 
@@ -111,14 +117,168 @@ test("dashboard remains a locked, bounded, no-alert overview", () => {
     "service",
   ]);
   for (const variable of Object.values(variables)) {
-    assert.equal(variable.type, "custom");
-    assert.equal(variable.includeAll, false);
     assert.equal(variable.multi, false);
+  }
+  assert.equal(variables.service.type, "custom");
+  assert.equal(variables.service.includeAll, false);
+  assert.equal(variables.level.type, "custom");
+  assert.equal(variables.level.includeAll, false);
+  assert.equal(variables.revision.type, "query");
+  assert.equal(variables.revision.includeAll, true);
+});
+
+test("log variables and API queries consume the complete bounded label contract", () => {
+  const dashboard = JSON.parse(readFileSync(dashboardPath, "utf8"));
+  const variables = Object.fromEntries(
+    dashboard.templating.list.map((variable) => [variable.name, variable]),
+  );
+  const services = [
+    "alloy",
+    "api",
+    "backup",
+    "cloudflared",
+    "deploy",
+    "grafana",
+    "loki",
+    "migrate",
+    "observe",
+    "postgres",
+    "prometheus",
+    "storage-guard",
+    "web",
+  ];
+
+  assert.deepEqual(
+    variables.service.options.map(({ value }) => value).sort(),
+    services,
+  );
+  assert.equal(variables.service.query, services.join(","));
+  assert.deepEqual(
+    variables.level.options.map(({ value }) => value),
+    ["debug", "info", "warn", "error"],
+  );
+  assert.equal(variables.revision.datasource.uid, "dialed-loki");
+  assert.match(String(variables.revision.query), /label_values/);
+  assert.match(String(variables.revision.query), /service="api"/);
+  assert.equal(variables.revision.allValue, "[0-9a-f]{40}");
+
+  for (const title of [
+    "API request rate",
+    "API p95 response time",
+    "API status classes",
+  ]) {
+    const panel = dashboard.panels.find(
+      (candidate) => candidate.title === title,
+    );
+    assert.ok(panel, title);
+    for (const target of panel.targets) {
+      assert.match(target.expr, /environment="poc"/);
+      assert.match(target.expr, /service="api"/);
+      assert.match(target.expr, /revision=~"\$revision"/);
+    }
+  }
+
+  for (const title of ["Recent errors", "Dialed logs"]) {
+    const panel = dashboard.panels.find(
+      (candidate) => candidate.title === title,
+    );
+    assert.doesNotMatch(panel.targets[0].expr, /revision/);
   }
 });
 
-test("operation panels isolate timestamps and color failed results red", () => {
+test("service health gives each health, runtime, and readiness state its own semantics", () => {
   const dashboard = JSON.parse(readFileSync(dashboardPath, "utf8"));
+  const panel = dashboard.panels.find(
+    ({ title }) => title === "Service health",
+  );
+
+  assert.deepEqual(
+    panel.targets.map(({ expr, refId }) => [refId, expr]),
+    [
+      ["A", 'dialed_container_health_status{status="healthy"}'],
+      ["B", 'dialed_container_health_status{status="unhealthy"}'],
+      ["C", 'dialed_container_health_status{status="starting"}'],
+      ["D", 'dialed_container_health_status{status="none"}'],
+      ["E", "dialed_container_running"],
+      ["F", "dialed_observability_endpoint_up"],
+    ],
+  );
+  assert.deepEqual(panel.fieldConfig.defaults.mappings, []);
+
+  const stateMappings = new Map(
+    panel.fieldConfig.overrides.map((override) => [
+      override.matcher.options,
+      override.properties.find(({ id }) => id === "mappings")?.value[0].options,
+    ]),
+  );
+  for (const [refId, expected] of [
+    ["A", { color: "green", text: "Healthy" }],
+    ["B", { color: "red", text: "Unhealthy" }],
+    ["C", { color: "yellow", text: "Starting" }],
+    ["D", { color: "gray", text: "No health check" }],
+  ]) {
+    assert.deepEqual(stateMappings.get(refId)?.["1"], expected, refId);
+  }
+  assert.deepEqual(stateMappings.get("E"), {
+    0: { color: "red", text: "Stopped" },
+    1: { color: "green", text: "Running" },
+  });
+  assert.deepEqual(stateMappings.get("F"), {
+    0: { color: "red", text: "Endpoint down" },
+    1: { color: "green", text: "Ready" },
+  });
+});
+
+test("API status panel uses four bounded status-class LogQL series", () => {
+  const dashboard = JSON.parse(readFileSync(dashboardPath, "utf8"));
+  const panel = dashboard.panels.find(
+    ({ title }) => title === "API status classes",
+  );
+
+  assert.deepEqual(
+    panel.targets.map(({ expr, legendFormat, refId }) => [
+      refId,
+      legendFormat,
+      expr,
+    ]),
+    [
+      [
+        "A",
+        "2xx",
+        'sum(count_over_time({environment="poc", service="api", revision=~"$revision"} | json | msg="request completed" | statusCode=~"2.." [5m]))',
+      ],
+      [
+        "B",
+        "3xx",
+        'sum(count_over_time({environment="poc", service="api", revision=~"$revision"} | json | msg="request completed" | statusCode=~"3.." [5m]))',
+      ],
+      [
+        "C",
+        "4xx",
+        'sum(count_over_time({environment="poc", service="api", revision=~"$revision"} | json | msg="request completed" | statusCode=~"4.." [5m]))',
+      ],
+      [
+        "D",
+        "5xx",
+        'sum(count_over_time({environment="poc", service="api", revision=~"$revision"} | json | msg="request completed" | statusCode=~"5.." [5m]))',
+      ],
+    ],
+  );
+  assert.doesNotMatch(JSON.stringify(panel.targets), /sum by \(statusCode\)/);
+});
+
+test("operation producers, observe, and dashboards share the failure result enum", () => {
+  const dashboard = JSON.parse(readFileSync(dashboardPath, "utf8"));
+  const observe = readFileSync(observePath, "utf8");
+
+  for (const producerPath of [backupPath, reconcilePath]) {
+    assert.match(
+      readFileSync(producerPath, "utf8"),
+      /operation_result=failure/,
+    );
+  }
+  assert.match(observe, /result="%s"/);
+  assert.match(observe, /(?:backup|deploy):failure:/);
 
   for (const operation of ["deployment", "backup"]) {
     const panel = dashboard.panels.find(
@@ -137,7 +297,7 @@ test("operation panels isolate timestamps and color failed results red", () => {
     assert.ok(resultTarget, `${operation} result target`);
     assert.equal(
       resultTarget.expr,
-      `dialed_operation_last_result{operation="${operation}",result="failed"}`,
+      `dialed_operation_last_result{operation="${operation}",result="failure"}`,
     );
     assert.ok(resultOverride, `${operation} result color override`);
     const thresholds = resultOverride.properties.find(

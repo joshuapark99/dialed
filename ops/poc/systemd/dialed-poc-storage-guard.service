@@ -11,5 +11,6 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
-ReadWritePaths=/var/lib/dialed/observability
+StandardError=journal
+SyslogLevel=crit
 TimeoutStartSec=30s

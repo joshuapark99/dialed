@@ -66,19 +66,51 @@ else
   exit 0
 fi
 
-if [ -f "$sentinel" ] && [ ! -L "$sentinel" ] &&
-  grep -Fqx "reason=$reason" "$sentinel"; then
-  exit 0
+if ! { [ -f "$sentinel" ] && [ ! -L "$sentinel" ] &&
+  grep -Fqx "reason=$reason" "$sentinel"; }; then
+  umask 077
+  temporary=$(mktemp "$observability_directory/.INGESTION_STOPPED.XXXXXX")
+  printf '%s\n' \
+    "reason=$reason" \
+    "observed_bytes=$observed_bytes" \
+    "threshold_bytes=$threshold_bytes" \
+    "timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$temporary"
+  chmod 0600 "$temporary"
+  mv "$temporary" "$sentinel"
 fi
 
-umask 077
-temporary=$(mktemp "$observability_directory/.INGESTION_STOPPED.XXXXXX")
-printf '%s\n' \
-  "reason=$reason" \
-  "observed_bytes=$observed_bytes" \
-  "threshold_bytes=$threshold_bytes" \
-  "timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$temporary"
-chmod 0600 "$temporary"
-mv "$temporary" "$sentinel"
+critical() {
+  printf 'dialed-poc-storage-guard: CRITICAL: %s\n' "$1" >&2
+}
 
-systemctl stop dialed-poc-alloy.service
+if ! alloy_state=$(systemctl show --property=ActiveState --value dialed-poc-alloy.service); then
+  critical 'could not determine dialed-poc-alloy.service state; ingestion stop is unverified'
+  exit 1
+fi
+
+case "$alloy_state" in
+  inactive | failed) exit 0 ;;
+  active | activating | reloading | deactivating) ;;
+  *)
+    critical 'could not determine dialed-poc-alloy.service state; ingestion stop is unverified'
+    exit 1
+    ;;
+esac
+
+critical 'observability storage threshold is active; stopping dialed-poc-alloy.service'
+if ! systemctl stop dialed-poc-alloy.service; then
+  critical 'failed to stop dialed-poc-alloy.service; the storage guard will retry'
+  exit 1
+fi
+
+if ! alloy_state=$(systemctl show --property=ActiveState --value dialed-poc-alloy.service); then
+  critical 'could not verify dialed-poc-alloy.service after stop; the storage guard will retry'
+  exit 1
+fi
+case "$alloy_state" in
+  inactive | failed) ;;
+  *)
+    critical 'dialed-poc-alloy.service is not stopped; the storage guard will retry'
+    exit 1
+    ;;
+esac

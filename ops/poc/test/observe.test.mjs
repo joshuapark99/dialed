@@ -101,7 +101,15 @@ esac
   );
   writeFileSync(
     join(bin, "systemctl"),
-    "#!/bin/sh\nprintf '%s\\n' inactive\n",
+    `#!/bin/sh
+case "$*" in
+  "show --property=ActiveState --value dialed-poc-alloy.service")
+    [ "$FAKE_ALLOY_STATE" = "query-fail" ] && exit 70
+    printf '%s\n' "$FAKE_ALLOY_STATE"
+    ;;
+  *) exit 71 ;;
+esac
+`,
     { mode: 0o755 },
   );
   writeFileSync(join(bin, "date"), "#!/bin/sh\nprintf '%s\\n' 1787992500\n", {
@@ -123,6 +131,7 @@ function runObserve(value, overrides = {}, arguments_ = []) {
       DIALED_OBSERVABILITY_DIR: join(value.root, "observability"),
       FAKE_DOCKER_MODE: "success",
       FAKE_CURL_DOWN: "",
+      FAKE_ALLOY_STATE: "inactive",
       ...overrides,
     },
   });
@@ -229,6 +238,71 @@ test("observe reports the fixed health-status set without container identifiers"
   assert.doesNotMatch(snapshot, /status="(null|missing|container-|unknown)"/);
 });
 
+test("health status, stopped services, and endpoint failures remain distinct", (t) => {
+  const value = fixture(t);
+  const result = runObserve(value, { FAKE_CURL_DOWN: "loki" });
+
+  assert.equal(result.status, 0, result.stderr);
+  const snapshot = readFileSync(join(value.textfile, "dialed.prom"), "utf8");
+  for (const [stack, service, status] of [
+    ["poc", "api", "healthy"],
+    ["poc", "web", "starting"],
+    ["poc", "cloudflared", "none"],
+    ["observability", "loki", "unhealthy"],
+    ["observability", "prometheus", "none"],
+  ]) {
+    assert.match(
+      snapshot,
+      new RegExp(
+        `dialed_container_health_status\\{stack="${stack}",service="${service}",status="${status}"\\} 1\\n`,
+      ),
+      `${stack}/${service}`,
+    );
+  }
+  assert.match(
+    snapshot,
+    /dialed_observability_endpoint_up\{service="grafana"\} 1\n/,
+  );
+  assert.match(
+    snapshot,
+    /dialed_observability_endpoint_up\{service="loki"\} 0\n/,
+  );
+  assert.match(
+    snapshot,
+    /dialed_container_running\{stack="observability",service="prometheus"\} 0\n/,
+  );
+});
+
+test("ingestion-stopped is true only for a sentinel with verified inactive Alloy", (t) => {
+  const value = fixture(t);
+  writeFileSync(value.sentinel, "reason=used_bytes\n", { mode: 0o600 });
+
+  for (const [alloyState, expected] of [
+    ["active", "0"],
+    ["activating", "0"],
+    ["query-fail", "0"],
+    ["inactive", "1"],
+    ["failed", "1"],
+  ]) {
+    const result = runObserve(value, { FAKE_ALLOY_STATE: alloyState });
+    assert.equal(result.status, 0, `${alloyState}: ${result.stderr}`);
+    const snapshot = readFileSync(join(value.textfile, "dialed.prom"), "utf8");
+    assert.match(
+      snapshot,
+      new RegExp(`dialed_observability_ingestion_stopped ${expected}\\n`),
+      alloyState,
+    );
+  }
+
+  rmSync(value.sentinel);
+  const noSentinel = runObserve(value, { FAKE_ALLOY_STATE: "inactive" });
+  assert.equal(noSentinel.status, 0, noSentinel.stderr);
+  assert.match(
+    readFileSync(join(value.textfile, "dialed.prom"), "utf8"),
+    /dialed_observability_ingestion_stopped 0\n/,
+  );
+});
+
 test("a Docker query failure retains the prior complete snapshot", (t) => {
   const value = fixture(t);
   const destination = join(value.textfile, "dialed.prom");
@@ -246,6 +320,22 @@ test("observe rejects a caller-supplied service argument", (t) => {
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /usage|argument/i);
+});
+
+test("observe requires the installer-rendered observability path", (t) => {
+  const value = fixture(t);
+  const destination = join(value.textfile, "dialed.prom");
+  writeFileSync(destination, "prior complete snapshot\n", { mode: 0o640 });
+
+  const result = runObserve(value, { DIALED_OBSERVABILITY_DIR: "" });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /DIALED_OBSERVABILITY_DIR is required/);
+  assert.equal(readFileSync(destination, "utf8"), "prior complete snapshot\n");
+  assert.doesNotMatch(
+    readFileSync(observePath, "utf8"),
+    /DIALED_OBSERVABILITY_DIR:-\/var\/lib\/dialed\/observability/,
+  );
 });
 
 test("record-operation atomically replaces only validated operation state", (t) => {

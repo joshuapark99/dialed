@@ -28,6 +28,29 @@ loki.relabel "journal" {
   rule {
     source_labels = ["__journal_priority_keyword"]
     target_label  = "level"
+    regex         = "(emerg|alert|crit|err|error)"
+    replacement   = "error"
+  }
+
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+    regex         = "(warning|warn)"
+    replacement   = "warn"
+  }
+
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+    regex         = "(notice|info)"
+    replacement   = "info"
+  }
+
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+    regex         = "debug"
+    replacement   = "debug"
   }
 
   rule {
@@ -46,6 +69,15 @@ loki.relabel "journal" {
     source_labels = ["__journal_container_name"]
     regex         = "dialed-poc-(api|web|postgres|migrate|cloudflared)-1"
     target_label  = "service"
+    replacement   = "$1"
+  }
+
+  // Docker's journald driver sanitizes io.dialed.revision to the
+  // IO_DIALED_REVISION journal field. Keep only a validated Git revision.
+  rule {
+    source_labels = ["__journal_io_dialed_revision"]
+    regex         = "([0-9a-f]{40})"
+    target_label  = "revision"
     replacement   = "$1"
   }
 
@@ -74,7 +106,7 @@ loki.process "journal" {
 
   stage.json {
     expressions = {
-      level        = "level"
+      pino_level   = "level"
       requestId    = "requestId"
       method       = "method"
       route        = "route"
@@ -85,19 +117,59 @@ loki.process "journal" {
     }
   }
 
-  // Only these extracted Pino fields become labels. Request identifiers,
-  // routes, methods, status codes, timings, and message text remain log data.
+  // Pino's numeric level is temporary and removed before Loki ingestion.
+  // Request identifiers, routes, methods, status codes, timings, revision,
+  // and message text remain log data rather than derived labels.
   stage.labels {
     values = {
-      level    = ""
-      revision = ""
+      pino_level = ""
+    }
+  }
+
+  stage.match {
+    selector = "{pino_level=~\"(10|20)\"}"
+
+    stage.static_labels {
+      values = {
+        level = "debug"
+      }
+    }
+  }
+
+  stage.match {
+    selector = "{pino_level=~\"(30)\"}"
+
+    stage.static_labels {
+      values = {
+        level = "info"
+      }
+    }
+  }
+
+  stage.match {
+    selector = "{pino_level=~\"(40)\"}"
+
+    stage.static_labels {
+      values = {
+        level = "warn"
+      }
+    }
+  }
+
+  stage.match {
+    selector = "{pino_level=~\"(50|60)\"}"
+
+    stage.static_labels {
+      values = {
+        level = "error"
+      }
     }
   }
 
   // The local observability stack keeps warnings and errors while avoiding
   // routine self-noise. Application and operation logs are retained.
   stage.match {
-    selector            = "{service=~\"(grafana|loki|prometheus|alloy)\", level=~\"(20|30|debug|info)\"}"
+    selector            = "{service=~\"(grafana|loki|prometheus|alloy)\", level=~\"(debug|info)\"}"
     action              = "drop"
     drop_counter_reason = "drop_observability_info_debug"
   }
@@ -154,7 +226,7 @@ prometheus.exporter.unix "host" {
   }
 
   textfile {
-    directory = "/var/lib/dialed/observability/textfile"
+    directory = "/run/dialed-observability/textfile"
   }
 }
 
