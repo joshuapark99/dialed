@@ -79,7 +79,7 @@ docker compose up --build
 
 Set real values for `BETTER_AUTH_SECRET`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET` before exposing the stack outside local development. Production deployments should use managed PostgreSQL backups, TLS at the ingress, and the same public origin for the web app and `/api` routes.
 
-For the Raspberry Pi proof-of-concept stack, Cloudflare Access setup, pull-based CI/CD, backups, rollback, and teardown procedures, see [ops/poc/README.md](ops/poc/README.md). The POC Compose topology publishes no host ports and is separate from the local development stack.
+For the Raspberry Pi proof-of-concept stack, Cloudflare Access setup, pull-based CI/CD, backups, rollback, SSH-only Grafana observability, and independent teardown procedures, see [ops/poc/README.md](ops/poc/README.md). The POC Compose topology publishes no application host ports; observability exposes only Grafana, Loki, and Prometheus on Pi loopback and is separate from the local development stack.
 
 ### POC access boundary
 
