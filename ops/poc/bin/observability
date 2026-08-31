@@ -13,9 +13,7 @@ case "$command" in
 esac
 
 load_poc_env
-require_value DIALED_OBSERVABILITY_DIR "${DIALED_OBSERVABILITY_DIR:-}"
-require_value GRAFANA_ADMIN_USER "${GRAFANA_ADMIN_USER:-}"
-require_value GRAFANA_ADMIN_PASSWORD "${GRAFANA_ADMIN_PASSWORD:-}"
+validate_observability_environment
 
 DIALED_OBSERVABILITY_COMPOSE_FILE=${DIALED_OBSERVABILITY_COMPOSE_FILE:-/opt/dialed/compose.observability.yaml}
 DIALED_OBSERVABILITY_CONFIG_DIR=${DIALED_OBSERVABILITY_CONFIG_DIR:-/opt/dialed/observability}

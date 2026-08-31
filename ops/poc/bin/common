@@ -21,6 +21,104 @@ require_value() {
   [ -n "$value_value" ] || die "$value_name is required"
 }
 
+require_positive_decimal() {
+  setting_name=$1
+  setting_value=$2
+  case "$setting_value" in
+    '' | *[!0-9]*) die "$setting_name must be a positive decimal integer" ;;
+  esac
+  [ "$setting_value" -gt 0 ] 2>/dev/null ||
+    die "$setting_name must be a positive decimal integer"
+}
+
+require_dedicated_storage_path() {
+  storage_name=$1
+  storage_path=$2
+  relative_path=${storage_path#/}
+  case "$relative_path" in
+    */*) ;;
+    *) die "$storage_name must be a dedicated nested path, not $storage_path" ;;
+  esac
+}
+
+require_disjoint_paths() {
+  left_name=$1
+  left_path=$2
+  right_name=$3
+  right_path=$4
+  case "$right_path" in
+    "$left_path" | "$left_path"/*)
+      die "$left_name and $right_name must be separate dedicated directories"
+      ;;
+  esac
+  case "$left_path" in
+    "$right_path" | "$right_path"/*)
+      die "$left_name and $right_name must be separate dedicated directories"
+      ;;
+  esac
+}
+
+require_grafana_admin_user() {
+  case "$1" in
+    '' | *[[:space:][:cntrl:]]*)
+      die "GRAFANA_ADMIN_USER must not contain whitespace or control characters"
+      ;;
+  esac
+}
+
+validate_observability_environment() {
+  command -v realpath >/dev/null 2>&1 || die "realpath is required"
+  for required_name in \
+    DIALED_DATA_DIR \
+    DIALED_BACKUP_DIR \
+    DIALED_OBSERVABILITY_DIR \
+    GRAFANA_ADMIN_USER \
+    GRAFANA_ADMIN_PASSWORD \
+    DIALED_OBSERVABILITY_MAX_BYTES \
+    DIALED_OBSERVABILITY_MIN_FREE_BYTES; do
+    eval "required_value=\${$required_name:-}"
+    require_value "$required_name" "$required_value"
+  done
+
+  require_grafana_admin_user "$GRAFANA_ADMIN_USER"
+  [ "${#GRAFANA_ADMIN_PASSWORD}" -ge 32 ] ||
+    die "GRAFANA_ADMIN_PASSWORD must contain at least 32 characters"
+  require_positive_decimal DIALED_OBSERVABILITY_MAX_BYTES "$DIALED_OBSERVABILITY_MAX_BYTES"
+  require_positive_decimal DIALED_OBSERVABILITY_MIN_FREE_BYTES "$DIALED_OBSERVABILITY_MIN_FREE_BYTES"
+
+  require_absolute_path DIALED_DATA_DIR "$DIALED_DATA_DIR"
+  require_absolute_path DIALED_BACKUP_DIR "$DIALED_BACKUP_DIR"
+  require_absolute_path DIALED_OBSERVABILITY_DIR "$DIALED_OBSERVABILITY_DIR"
+  data_path=$(realpath -m -- "$DIALED_DATA_DIR")
+  backup_path=$(realpath -m -- "$DIALED_BACKUP_DIR")
+  observability_path=$(realpath -m -- "$DIALED_OBSERVABILITY_DIR")
+  require_dedicated_storage_path DIALED_DATA_DIR "$data_path"
+  require_dedicated_storage_path DIALED_BACKUP_DIR "$backup_path"
+  require_dedicated_storage_path DIALED_OBSERVABILITY_DIR "$observability_path"
+  require_disjoint_paths DIALED_DATA_DIR "$data_path" DIALED_BACKUP_DIR "$backup_path"
+  require_disjoint_paths DIALED_DATA_DIR "$data_path" DIALED_OBSERVABILITY_DIR "$observability_path"
+  require_disjoint_paths DIALED_BACKUP_DIR "$backup_path" DIALED_OBSERVABILITY_DIR "$observability_path"
+}
+
+require_alloy_version() {
+  version_token=$(printf '%s\n' "$1" | awk '
+    {
+      for (field = 1; field <= NF; field += 1) {
+        if ($field == "version") {
+          version = $(field + 1)
+          sub(/^v/, "", version)
+          print version
+          exit
+        }
+      }
+    }
+  ')
+  case "$version_token" in
+    1.19.0) ;;
+    *) die "Grafana Alloy 1.19.0 is required; found $version_token" ;;
+  esac
+}
+
 validate_owned_file() {
   file_path=$1
   require_absolute_path "file" "$file_path"

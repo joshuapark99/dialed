@@ -14,6 +14,14 @@ function readInstaller() {
   return readFileSync(join(pocRoot, "bin", "install"), "utf8");
 }
 
+function readCommon() {
+  return readFileSync(join(pocRoot, "bin", "common"), "utf8");
+}
+
+function compactShell(source) {
+  return source.replaceAll(/\\\n\s*/g, " ").replaceAll(/[ \t]+/g, " ");
+}
+
 function parseUnit(name) {
   const sections = new Map();
   let section;
@@ -229,27 +237,43 @@ test("installer preserves operator secrets and validates before enabling timers"
 
 test("installer provisions the complete observability stack before dependency-ordered units", () => {
   const source = readInstaller();
-  const validateCompose = source.indexOf("compose.observability.yaml");
-  const validateAlloy = source.indexOf("alloy validate");
-  const validateLoki = source.indexOf("-verify-config=true");
-  const validatePrometheus = source.indexOf("promtool");
-  const enableObservability = source.indexOf(
-    "dialed-poc-observability.service",
-  );
-  const enableObserve = source.indexOf("dialed-poc-observe.timer");
-  const enableGuard = source.indexOf("dialed-poc-storage-guard.timer");
-  const enableAlloy = source.indexOf("dialed-poc-alloy.service");
-  const enableDeploy = source.indexOf("dialed-poc-deploy.timer");
-  const enableBackup = source.indexOf("dialed-poc-backup.timer");
+  const common = readCommon();
+  const compactSource = compactShell(source);
+  const validators = [
+    'docker compose --env-file /etc/dialed/poc.env -f "$stage_directory/compose.poc.yaml" config --quiet',
+    'docker compose --env-file /etc/dialed/poc.env -f "$stage_directory/compose.observability.yaml" config --quiet',
+    '/usr/bin/alloy validate "$stage_directory/observability/alloy/config.alloy"',
+    'docker run --rm -v "$stage_directory/observability/loki.yaml:/etc/loki/config.yaml:ro" grafana/loki:3.7.6 -verify-config=true -config.file=/etc/loki/config.yaml',
+    'docker run --rm --entrypoint promtool -v "$stage_directory/observability/prometheus.yaml:/etc/prometheus/prometheus.yml:ro" prom/prometheus:v3.13.2 check config /etc/prometheus/prometheus.yml',
+  ];
+  const activeCopies = [
+    'install -o root -g root -m 0644 "$stage_directory/compose.poc.yaml" /opt/dialed/compose.poc.yaml',
+    'install -o root -g root -m 0644 "$stage_directory/compose.observability.yaml" /opt/dialed/compose.observability.yaml',
+    'install_configuration_tree "$stage_directory/observability" /opt/dialed/observability',
+    'install -o root -g root -m 0755 "$POC_ROOT/bin/$executable" "/opt/dialed/bin/$executable"',
+    'install -D -o root -g root -m 0644 "$library" "/opt/dialed/lib/$(basename "$library")"',
+    'install -o root -g root -m 0644 "$POC_ROOT/systemd/$unit" "/etc/systemd/system/$(basename "$unit")"',
+    'mv -f "$journald_stage" /etc/systemd/journald.conf.d/90-dialed-poc.conf',
+  ];
+  const enables = [
+    "systemctl enable --now dialed-poc-observability.service",
+    "systemctl enable --now dialed-poc-observe.timer",
+    "systemctl enable --now dialed-poc-storage-guard.timer",
+    "systemctl enable --now dialed-poc-alloy.service",
+    "systemctl enable --now dialed-poc-deploy.timer",
+    "systemctl enable --now dialed-poc-backup.timer",
+  ];
 
   assert.match(source, /require_command curl/);
   assert.match(source, /alloy --version/);
-  assert.match(source, /1\.19\.0/);
-  assert.match(source, /DIALED_OBSERVABILITY_DIR/);
-  assert.match(source, /GRAFANA_ADMIN_USER/);
-  assert.match(source, /GRAFANA_ADMIN_PASSWORD/);
-  assert.match(source, /DIALED_OBSERVABILITY_MAX_BYTES/);
-  assert.match(source, /DIALED_OBSERVABILITY_MIN_FREE_BYTES/);
+  assert.match(source, /require_alloy_version/);
+  assert.match(source, /validate_observability_environment/);
+  assert.match(common, /1\.19\.0/);
+  assert.match(common, /DIALED_OBSERVABILITY_DIR/);
+  assert.match(common, /GRAFANA_ADMIN_USER/);
+  assert.match(common, /GRAFANA_ADMIN_PASSWORD/);
+  assert.match(common, /DIALED_OBSERVABILITY_MAX_BYTES/);
+  assert.match(common, /DIALED_OBSERVABILITY_MIN_FREE_BYTES/);
   assert.match(source, /observability_path/);
   assert.match(source, /grafana.*472 472 0700/s);
   assert.match(source, /loki.*10001 10001 0700/s);
@@ -257,17 +281,49 @@ test("installer provisions the complete observability stack before dependency-or
   assert.match(source, /textfile.*root alloy 0750/s);
   assert.match(source, /operations.*root root 0700/s);
   assert.match(source, /90-dialed-poc\.conf/);
-  assert.ok(validateCompose >= 0);
-  assert.ok(validateAlloy > validateCompose);
-  assert.ok(validateLoki > validateAlloy);
-  assert.ok(validatePrometheus > validateLoki);
-  assert.ok(enableObservability > validatePrometheus);
-  assert.ok(enableObserve > enableObservability);
-  assert.ok(enableGuard > enableObserve);
-  assert.ok(enableAlloy > enableGuard);
-  assert.ok(enableDeploy > enableAlloy);
-  assert.ok(enableBackup > enableDeploy);
+  const validatorPositions = validators.map((command) =>
+    compactSource.indexOf(command),
+  );
+  const activeCopyPositions = activeCopies.map((command) =>
+    compactSource.indexOf(command),
+  );
+  const enablePositions = enables.map((command) =>
+    compactSource.indexOf(command),
+  );
+  for (const [index, position] of validatorPositions.entries()) {
+    assert.ok(position >= 0, `missing validator: ${validators[index]}`);
+  }
+  for (const [index, position] of activeCopyPositions.entries()) {
+    assert.ok(position >= 0, `missing active copy: ${activeCopies[index]}`);
+  }
+  for (const [index, position] of enablePositions.entries()) {
+    assert.ok(position >= 0, `missing enablement: ${enables[index]}`);
+  }
+  for (let index = 1; index < validatorPositions.length; index += 1) {
+    assert.ok(validatorPositions[index - 1] < validatorPositions[index]);
+  }
+  const firstActiveCopy = Math.min(...activeCopyPositions);
+  const firstEnablement = enablePositions[0];
+  for (const position of validatorPositions) {
+    assert.ok(position < firstActiveCopy);
+    assert.ok(position < firstEnablement);
+  }
+  assert.ok(Math.max(...activeCopyPositions) < firstEnablement);
+  for (let index = 1; index < enablePositions.length; index += 1) {
+    assert.ok(enablePositions[index - 1] < enablePositions[index]);
+  }
   assert.doesNotMatch(source, /chown\s+-R|chown\s+--recursive/);
+});
+
+test("staged Compose validation uses a full digest placeholder", () => {
+  const source = readInstaller();
+  const match = source.match(/^zero_digest=([^\n]+)$/m);
+
+  assert.ok(match);
+  assert.equal(match[1].length, 64);
+  assert.match(match[1], /^[0-9a-f]+$/);
+  assert.match(source, /WEB_IMAGE=.*@sha256:\$zero_digest/);
+  assert.match(source, /API_IMAGE=.*@sha256:\$zero_digest/);
 });
 
 test("installer ships every observability operation and its service or timer", () => {
@@ -290,10 +346,12 @@ test("installer ships every observability operation and its service or timer", (
 
 test("installer validates dedicated storage without chmodding existing paths", () => {
   const source = readInstaller();
-  assert.match(source, /require_dedicated_storage_path/);
+  const common = readCommon();
+  assert.match(source, /validate_observability_environment/);
+  assert.match(common, /require_dedicated_storage_path/);
   assert.match(source, /ensure_component_directory/);
-  assert.match(source, /must be a dedicated nested path/);
-  assert.match(source, /must be separate dedicated directories/);
+  assert.match(common, /must be a dedicated nested path/);
+  assert.match(common, /must be separate dedicated directories/);
   assert.doesNotMatch(
     source,
     /install -d -o root -g root -m 0700 "\$data_path" "\$backup_path"/,
