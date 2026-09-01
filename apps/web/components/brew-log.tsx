@@ -179,7 +179,7 @@ export function BrewLog({
   }
 
   return (
-    <div className="view-enter pb-28 lg:pb-8">
+    <div className="view-enter pb-44 lg:pb-8">
       <PageHeading
         eyebrow="New espresso"
         title="Log this shot"
@@ -280,8 +280,14 @@ export function BrewLog({
                 min="1"
               />
               <label>
-                <span className="label">Grind</span>
+                <span className="label">
+                  Grind <span className="text-coral">(required)</span>
+                </span>
                 <input
+                  required
+                  aria-describedby={
+                    !grind.trim() ? "grind-save-requirement" : undefined
+                  }
                   className="field"
                   value={grind}
                   onChange={(e) => setGrind(e.target.value)}
@@ -464,20 +470,28 @@ export function BrewLog({
               </p>
             </div>
           ) : null}
-          <button
-            type="button"
-            disabled={!valid || saving}
-            onClick={() => void save()}
-            className="button-primary fixed bottom-[calc(5.5rem+env(safe-area-inset-bottom))] left-4 right-4 z-20 shadow-xl xl:static xl:w-full xl:shadow-none"
-          >
-            {saving ? "Saving..." : "Save and see next move"}
-            <Check className="h-5 w-5" />
-          </button>
-          {!grind.trim() && (
-            <p className="mt-2 hidden text-center text-xs text-muted xl:block">
-              Add your grind setting to continue.
-            </p>
-          )}
+          <div className="fixed bottom-[calc(5.5rem+env(safe-area-inset-bottom))] left-4 right-4 z-20 xl:static">
+            <button
+              type="button"
+              disabled={!valid || saving}
+              aria-describedby={
+                !grind.trim() ? "grind-save-requirement" : undefined
+              }
+              onClick={() => void save()}
+              className="button-primary w-full shadow-xl xl:shadow-none"
+            >
+              {saving ? "Saving..." : "Save and see next move"}
+              <Check className="h-5 w-5" />
+            </button>
+            {!grind.trim() && (
+              <p
+                id="grind-save-requirement"
+                className="mt-2 rounded-md bg-canvas/95 px-3 py-1.5 text-center text-xs font-semibold text-muted shadow-sm"
+              >
+                Enter a grind setting to save.
+              </p>
+            )}
+          </div>
         </aside>
       </div>
     </div>

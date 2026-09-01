@@ -666,7 +666,9 @@ test("groups repeat bags and keeps comparisons bag-specific", async ({
     .getAttribute("value");
   expect(olderBagId).not.toBeNull();
   await coffeeSelect.selectOption(olderBagId!);
-  await page.getByRole("textbox", { name: "Grind", exact: true }).fill("0.8");
+  await page
+    .getByRole("textbox", { name: "Grind (required)", exact: true })
+    .fill("0.8");
   await page.getByRole("button", { name: "Save and see next move" }).click();
 
   await page.getByRole("button", { name: "Log the next shot" }).click();
@@ -679,7 +681,9 @@ test("groups repeat bags and keeps comparisons bag-specific", async ({
   await expect(
     page.getByRole("option", { name: /Hualalai Kona.*Aug 15/ }),
   ).toBeVisible();
-  await page.getByRole("textbox", { name: "Grind", exact: true }).fill("0.9");
+  await page
+    .getByRole("textbox", { name: "Grind (required)", exact: true })
+    .fill("0.9");
   await page.getByRole("button", { name: "Save and see next move" }).click();
   await expect(page.getByText(/Hualalai Kona.*Aug 15/)).toBeVisible();
 
@@ -858,6 +862,56 @@ test("adds fixed Coffee fields and a first bag with recoverable validation error
   });
 });
 
+test("explains why brew save is disabled on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  await completeOnboarding(page);
+
+  await page.getByRole("button", { name: "Log", exact: true }).click();
+
+  const grindInput = page.getByRole("textbox", {
+    name: /grind.*required/i,
+  });
+  const saveButton = page.getByRole("button", {
+    name: "Save and see next move",
+  });
+  const grindRequirement = page.getByText(/grind setting.*save/i);
+  await expect(grindInput).toBeVisible();
+  await expect(saveButton).toBeDisabled();
+  await expect(saveButton).toHaveAttribute(
+    "aria-describedby",
+    "grind-save-requirement",
+  );
+  await expect(grindRequirement).toBeVisible();
+
+  await grindInput.fill("0.8");
+
+  await expect(saveButton).toBeEnabled();
+  await expect(saveButton).not.toHaveAttribute("aria-describedby");
+  await expect(grindRequirement).toBeHidden();
+});
+
+test("keeps the mobile brew form above the fixed save action", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 667 });
+  await page.goto("/");
+  await completeOnboarding(page);
+
+  await page.getByRole("button", { name: "Log", exact: true }).click();
+  await page.evaluate(() =>
+    window.scrollTo({ top: document.documentElement.scrollHeight }),
+  );
+
+  const formBounds = await page.locator("details").boundingBox();
+  const saveBounds = await page
+    .getByRole("button", { name: "Save and see next move" })
+    .boundingBox();
+  expect(formBounds).not.toBeNull();
+  expect(saveBounds).not.toBeNull();
+  expect(formBounds!.y + formBounds!.height).toBeLessThanOrEqual(saveBounds!.y);
+});
+
 test("onboards, logs a shot, and returns one next move on mobile", async ({
   page,
 }, testInfo) => {
@@ -870,7 +924,9 @@ test("onboards, logs a shot, and returns one next move on mobile", async ({
   await completeOnboarding(page);
 
   await page.getByRole("button", { name: "Log", exact: true }).click();
-  await page.getByRole("textbox", { name: "Grind", exact: true }).fill("0.8");
+  await page
+    .getByRole("textbox", { name: "Grind (required)", exact: true })
+    .fill("0.8");
   await page.getByRole("button", { name: "Save and see next move" }).click();
 
   await expect(page.getByText("Your next move")).toBeVisible();
@@ -896,7 +952,9 @@ test("requires confirmation before deleting a brew log", async ({ page }) => {
   await page.goto("/");
   await completeOnboarding(page);
   await page.getByRole("button", { name: "Log", exact: true }).click();
-  await page.getByRole("textbox", { name: "Grind", exact: true }).fill("0.8");
+  await page
+    .getByRole("textbox", { name: "Grind (required)", exact: true })
+    .fill("0.8");
   await page.getByRole("button", { name: "Save and see next move" }).click();
   await page.getByRole("button", { name: "History" }).click();
   await page.getByRole("button", { name: /Hualalai Kona/ }).click();
@@ -920,7 +978,9 @@ test("keeps the brew log and reports a deletion failure", async ({ page }) => {
   await page.goto("/");
   await completeOnboarding(page);
   await page.getByRole("button", { name: "Log", exact: true }).click();
-  await page.getByRole("textbox", { name: "Grind", exact: true }).fill("0.8");
+  await page
+    .getByRole("textbox", { name: "Grind (required)", exact: true })
+    .fill("0.8");
   await page.getByRole("button", { name: "Save and see next move" }).click();
   await page.getByRole("button", { name: "History" }).click();
   await page.getByRole("button", { name: /Hualalai Kona/ }).click();
