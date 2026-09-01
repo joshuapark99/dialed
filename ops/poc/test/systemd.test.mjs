@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -30,6 +31,10 @@ function readCommon() {
 function compactShell(source) {
   return source.replaceAll(/\\\n\s*/g, " ").replaceAll(/[ \t]+/g, " ");
 }
+
+test("documented installer entrypoint is executable", () => {
+  assert.notEqual(statSync(join(pocRoot, "bin", "install")).mode & 0o111, 0);
+});
 
 function parseUnit(name) {
   const sections = new Map();
@@ -103,7 +108,11 @@ test("observability snapshots run as a constrained root one-shot every thirty se
     value(observe, "Service", "ExecStart"),
     "/opt/dialed/bin/observe",
   );
-  assert.equal(value(observe, "Service", "CapabilityBoundingSet"), "");
+  assert.equal(
+    value(observe, "Service", "CapabilityBoundingSet"),
+    "CAP_CHOWN",
+  );
+  assert.equal(value(observe, "Service", "AmbientCapabilities"), "");
   assert.equal(value(observe, "Service", "NoNewPrivileges"), "true");
   assert.equal(value(observe, "Service", "PrivateTmp"), "true");
   assert.equal(value(observe, "Service", "ProtectHome"), "true");
@@ -251,17 +260,18 @@ test("installer renders one safe SSD path contract into each observability unit"
   assert.match(
     alloy,
     new RegExp(
-      `^BindPaths="${observability}/alloy:/run/dialed-observability/alloy"$`,
+      `^BindPaths=${observability}/alloy:/run/dialed-observability/alloy$`,
       "m",
     ),
   );
   assert.match(
     alloy,
     new RegExp(
-      `^BindReadOnlyPaths="${observability}/textfile:/run/dialed-observability/textfile"$`,
+      `^BindReadOnlyPaths=${observability}/textfile:/run/dialed-observability/textfile$`,
       "m",
     ),
   );
+  assert.doesNotMatch(alloy, /^Bind(?:ReadOnly)?Paths="/m);
   assert.doesNotMatch(alloy, new RegExp(`${observability}:`));
   for (const [source, writePath] of [
     [observe, `${observability}/textfile`],
@@ -427,8 +437,14 @@ test("installer secures validated core timers before optional observability work
   const observabilityCopy = compactSource.indexOf(
     'install -o root -g root -m 0644 "$observability_stage/compose.observability.yaml" /opt/dialed/compose.observability.yaml',
   );
+  const alloyStop = compactSource.indexOf(
+    "systemctl stop dialed-poc-alloy.service",
+  );
   const observabilityEnable = compactSource.indexOf(
-    "systemctl enable --now dialed-poc-observability.service",
+    "systemctl enable dialed-poc-observability.service",
+  );
+  const observabilityRestart = compactSource.indexOf(
+    "systemctl restart dialed-poc-observability.service",
   );
 
   assert.match(source, /require_command curl/);
@@ -458,7 +474,9 @@ test("installer secures validated core timers before optional observability work
     observabilityPull,
     observabilityValidator,
     observabilityCopy,
+    alloyStop,
     observabilityEnable,
+    observabilityRestart,
   ]) {
     assert.ok(position >= 0);
   }
@@ -468,6 +486,8 @@ test("installer secures validated core timers before optional observability work
   assert.ok(backupEnable < observabilityPull);
   assert.ok(observabilityPull < observabilityValidator);
   assert.ok(observabilityValidator < observabilityCopy);
+  assert.ok(observabilityCopy < alloyStop);
+  assert.ok(alloyStop < observabilityRestart);
   assert.ok(observabilityCopy < observabilityEnable);
   assert.doesNotMatch(source, /docker compose[^\n]*(?:down|stop|up|create)/);
   assert.doesNotMatch(source, /chown\s+-R|chown\s+--recursive/);

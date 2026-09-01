@@ -42,8 +42,8 @@ write_dropin() {
     alloy)
       printf '%s\n' \
         '[Service]' \
-        "BindPaths=\"$observability_directory/alloy:/run/dialed-observability/alloy\"" \
-        "BindReadOnlyPaths=\"$observability_directory/textfile:/run/dialed-observability/textfile\"" \
+        "BindPaths=$observability_directory/alloy:/run/dialed-observability/alloy" \
+        "BindReadOnlyPaths=$observability_directory/textfile:/run/dialed-observability/textfile" \
         >"$temporary"
       ;;
     observe)

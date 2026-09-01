@@ -296,7 +296,9 @@ activate_observability_assets() {
 start_observability_services() {
   systemctl restart systemd-journald.service
   systemctl daemon-reload
-  systemctl enable --now dialed-poc-observability.service
+  systemctl stop dialed-poc-alloy.service
+  systemctl enable dialed-poc-observability.service
+  systemctl restart dialed-poc-observability.service
   systemctl enable --now dialed-poc-observe.timer
   systemctl enable --now dialed-poc-storage-guard.timer
   systemctl enable --now dialed-poc-alloy.service
