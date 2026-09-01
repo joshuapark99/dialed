@@ -57,13 +57,21 @@ test(
     assert.equal(model.services.grafana.ports[0].published, "3002");
     assert.equal(model.services.loki.ports[0].host_ip, "127.0.0.1");
     assert.equal(model.services.prometheus.ports[0].host_ip, "127.0.0.1");
-    assert.deepEqual(Object.keys(model.networks), ["observability"]);
+    assert.deepEqual(Object.keys(model.networks).sort(), [
+      "host-publish",
+      "observability",
+    ]);
     assert.equal(model.networks.observability.driver, "bridge");
     assert.equal(model.networks.observability.internal, true);
+    assert.equal(model.networks["host-publish"].driver, "bridge");
+    assert.notEqual(model.networks["host-publish"].internal, true);
 
     for (const [name, ceiling] of Object.entries(ceilings)) {
       const service = model.services[name];
-      assert.deepEqual(service.networks, { observability: null });
+      assert.deepEqual(service.networks, {
+        "host-publish": null,
+        observability: null,
+      });
       assert.equal(service.restart, "unless-stopped");
       assert.deepEqual(service.cap_drop, ["ALL"]);
       assert.ok(service.security_opt.includes("no-new-privileges:true"));
@@ -341,5 +349,37 @@ test("Alloy version validation parses and accepts only the exact release", () =>
       { encoding: "utf8" },
     );
     assert.notEqual(result.status, 0, `${output} was accepted`);
+  }
+});
+
+test("Docker Engine version validation requires the loopback publishing fix", () => {
+  for (const version of ["28.0.0", "29.6.2", "30.0.0-rc.1"]) {
+    const result = spawnSync(
+      "sh",
+      [
+        "-c",
+        `. ${shellValue(commonPath)}; require_docker_engine_version "$1"`,
+        "sh",
+        version,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, `${version}: ${result.stderr}`);
+  }
+
+  for (const version of ["27.5.1", "27.0.0-rc.1", "28.0", "unknown", ""]) {
+    const result = spawnSync(
+      "sh",
+      [
+        "-c",
+        `. ${shellValue(commonPath)}; require_docker_engine_version "$1"`,
+        "sh",
+        version,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.notEqual(result.status, 0, `${version || "empty"} was accepted`);
+    assert.match(result.stderr, /Docker Engine 28 or newer is required/);
+    assert.ok(result.stderr.includes(`found ${version || "unknown"}`));
   }
 });

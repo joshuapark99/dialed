@@ -141,6 +141,28 @@ require_alloy_version() {
   esac
 }
 
+require_docker_engine_version() {
+  version_token=${1#v}
+  reported_version=${version_token:-unknown}
+  version_core=${version_token%%[-+]*}
+  old_ifs=$IFS
+  IFS=.
+  set -- $version_core
+  IFS=$old_ifs
+  if [ "$#" -ne 3 ]; then
+    die "Docker Engine 28 or newer is required; found $reported_version"
+  fi
+  for version_part in "$@"; do
+    case "$version_part" in
+      '' | *[!0-9]*)
+        die "Docker Engine 28 or newer is required; found $reported_version"
+        ;;
+    esac
+  done
+  [ "$1" -ge 28 ] ||
+    die "Docker Engine 28 or newer is required; found $reported_version"
+}
+
 validate_owned_file() {
   file_path=$1
   require_absolute_path "file" "$file_path"

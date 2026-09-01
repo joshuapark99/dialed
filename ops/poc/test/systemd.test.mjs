@@ -341,6 +341,10 @@ test("runtime-path sources stay aligned across installer, units, and collectors"
     assert.ok(installer.includes(child), child);
   }
   assert.match(alloy, /--storage\.path=\/run\/dialed-observability\/alloy/);
+  assert.match(
+    alloy,
+    /^RuntimeDirectory=dialed-observability\/alloy dialed-observability\/textfile$/m,
+  );
   assert.match(alloy, /\/opt\/dialed\/observability\/alloy\/config\.alloy/);
   assert.match(
     config,
@@ -428,6 +432,7 @@ test("installer secures validated core timers before optional observability work
   );
 
   assert.match(source, /require_command curl/);
+  assert.match(source, /require_docker_engine_version/);
   assert.match(source, /alloy --version/);
   assert.match(source, /require_alloy_version/);
   assert.match(source, /validate_observability_environment/);

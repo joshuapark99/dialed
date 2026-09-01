@@ -101,6 +101,9 @@ require_command realpath
 require_command systemctl
 require_compose_version
 docker info >/dev/null 2>&1 || die "the Docker daemon is not available"
+docker_engine_version=$(docker version --format '{{.Server.Version}}' 2>/dev/null) ||
+  die "could not determine the Docker Engine version"
+require_docker_engine_version "$docker_engine_version"
 
 install -d -o root -g root -m 0700 /etc/dialed /var/lib/dialed
 install -d -o root -g root -m 0755 /opt/dialed /opt/dialed/bin

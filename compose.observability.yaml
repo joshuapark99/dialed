@@ -31,6 +31,7 @@ services:
         read_only: true
     networks:
       observability: null
+      host-publish: null
     mem_limit: 512m
     cpus: "1"
     cap_drop:
@@ -55,6 +56,7 @@ services:
         target: /loki
     networks:
       observability: null
+      host-publish: null
     mem_limit: 512m
     cpus: "1"
     cap_drop:
@@ -81,6 +83,7 @@ services:
         target: /prometheus
     networks:
       observability: null
+      host-publish: null
     mem_limit: 384m
     cpus: "1"
     cap_drop:
@@ -92,3 +95,5 @@ networks:
   observability:
     driver: bridge
     internal: true
+  host-publish:
+    driver: bridge

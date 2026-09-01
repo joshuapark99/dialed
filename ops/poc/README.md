@@ -12,10 +12,11 @@ Use a Raspberry Pi 4 with at least 4 GB RAM or a Pi 5, a 64-bit Raspberry Pi OS 
 uname -m
 ```
 
-It must report `aarch64`. Install Docker Engine from Docker's supported Debian instructions and Docker Compose v2.24 or newer. Add the normal administrator to the `docker` group only if that access is intended; Docker access is root-equivalent.
+It must report `aarch64`. Install Docker Engine 28 or newer from Docker's supported Debian instructions and Docker Compose v2.24 or newer. Engine 28 is the minimum because older releases can expose ports published to loopback to hosts on the same layer-2 network. Add the normal administrator to the `docker` group only if that access is intended; Docker access is root-equivalent.
 
 ```bash
 docker info
+docker version --format '{{.Server.Version}}'
 docker compose version
 ```
 
@@ -157,6 +158,8 @@ Both responses must report the Git commit that produced the images. A published 
 ## Local observability
 
 Observability is a local, subordinate Pi service: Grafana, Loki, Prometheus, and Alloy must never be exposed through Cloudflare, the application networks, or the LAN. Grafana is available only at Pi loopback port `3002`; Loki and Prometheus use loopback ports `3100` and `9090`; Alloy diagnostics use loopback port `12345`. A Grafana, Loki, Prometheus, or Alloy failure must not be treated as an application, reconcile, or PostgreSQL-backup failure.
+
+Grafana, Loki, and Prometheus share an internal bridge for service discovery and a separate non-internal bridge that allows Docker Engine to activate their explicit loopback port mappings. The second bridge also gives those three containers outbound network access; it does not attach them to Dialed's application or ingress networks. Docker Engine 28 or newer and the `127.0.0.1` bindings are both required to preserve the no-LAN-exposure boundary.
 
 ### Install the pinned host dependency
 
