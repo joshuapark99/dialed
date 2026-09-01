@@ -108,10 +108,7 @@ test("observability snapshots run as a constrained root one-shot every thirty se
     value(observe, "Service", "ExecStart"),
     "/opt/dialed/bin/observe",
   );
-  assert.equal(
-    value(observe, "Service", "CapabilityBoundingSet"),
-    "CAP_CHOWN",
-  );
+  assert.equal(value(observe, "Service", "CapabilityBoundingSet"), "CAP_CHOWN");
   assert.equal(value(observe, "Service", "AmbientCapabilities"), "");
   assert.equal(value(observe, "Service", "NoNewPrivileges"), "true");
   assert.equal(value(observe, "Service", "PrivateTmp"), "true");
