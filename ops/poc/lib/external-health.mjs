@@ -2,12 +2,7 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-export function validateExternalHealthConfig({
-  baseUrl,
-  revision,
-  clientId,
-  clientSecret,
-}) {
+export function validateExternalHealthConfig({ baseUrl, revision }) {
   let origin;
   try {
     origin = new URL(baseUrl);
@@ -29,19 +24,9 @@ export function validateExternalHealthConfig({
       "APP_REVISION must be a lowercase 40-character Git revision",
     );
   }
-  if (
-    typeof clientId !== "string" ||
-    clientId.length === 0 ||
-    typeof clientSecret !== "string" ||
-    clientSecret.length === 0
-  ) {
-    throw new Error("Cloudflare Access service-token credentials are required");
-  }
   return {
     baseUrl: origin.origin,
     revision,
-    clientId,
-    clientSecret,
   };
 }
 
@@ -49,13 +34,11 @@ async function probe({
   label,
   url,
   expectedStatus,
-  headers,
   requestTimeoutMs,
   fetchImpl,
 }) {
   try {
     const response = await fetchImpl(url, {
-      headers,
       signal: AbortSignal.timeout(requestTimeoutMs),
     });
     let body;
@@ -87,57 +70,9 @@ function describeProbe(result) {
   return `${result.label}=${result.httpStatus}${state}${revision}`;
 }
 
-export async function verifyAccessProtection({
-  baseUrl,
-  fetchImpl = fetch,
-  requestTimeoutMs = 10_000,
-}) {
-  const origin = new URL(baseUrl);
-  if (origin.protocol !== "https:") {
-    throw new Error("Access protection verification requires HTTPS");
-  }
-
-  const response = await fetchImpl(new URL("/healthz", origin), {
-    redirect: "manual",
-    signal: AbortSignal.timeout(requestTimeoutMs),
-  });
-  if (response.status === 401 || response.status === 403) return;
-
-  if (response.status >= 300 && response.status < 400) {
-    const location = response.headers.get("location");
-    if (location) {
-      const login = new URL(location, origin);
-      if (
-        login.protocol === "https:" &&
-        login.hostname.endsWith(".cloudflareaccess.com") &&
-        login.pathname.startsWith("/cdn-cgi/access/")
-      ) {
-        return;
-      }
-    }
-  }
-
-  let body;
-  try {
-    body = await response.json();
-  } catch {
-    body = undefined;
-  }
-  if (response.ok && body?.status === "ok") {
-    throw new Error(
-      "POC origin health is publicly reachable without Cloudflare Access protection",
-    );
-  }
-  throw new Error(
-    `Could not prove Cloudflare Access protection; unauthenticated /healthz returned HTTP ${response.status}`,
-  );
-}
-
 export async function waitForExternalRevision({
   baseUrl,
   revision,
-  clientId,
-  clientSecret,
   timeoutMs,
   intervalMs,
   fetchImpl = fetch,
@@ -146,15 +81,9 @@ export async function waitForExternalRevision({
   const validated = validateExternalHealthConfig({
     baseUrl,
     revision,
-    clientId,
-    clientSecret,
   });
   const deadline = Date.now() + timeoutMs;
   const requestTimeoutMs = Math.max(1, Math.min(10_000, timeoutMs || 10_000));
-  const headers = {
-    "CF-Access-Client-Id": validated.clientId,
-    "CF-Access-Client-Secret": validated.clientSecret,
-  };
   const origin = new URL(validated.baseUrl);
   let lastObserved = "no response";
 
@@ -164,7 +93,6 @@ export async function waitForExternalRevision({
         label: "web",
         url: new URL("/healthz", origin),
         expectedStatus: "ok",
-        headers,
         requestTimeoutMs,
         fetchImpl,
       }),
@@ -172,7 +100,6 @@ export async function waitForExternalRevision({
         label: "api",
         url: new URL("/api/readyz", origin),
         expectedStatus: "ready",
-        headers,
         requestTimeoutMs,
         fetchImpl,
       }),

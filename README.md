@@ -79,13 +79,11 @@ docker compose up --build
 
 Set real values for `BETTER_AUTH_SECRET`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET` before exposing the stack outside local development. Production deployments should use managed PostgreSQL backups, TLS at the ingress, and the same public origin for the web app and `/api` routes.
 
-For the Raspberry Pi proof-of-concept stack, Cloudflare Access setup, pull-based CI/CD, backups, rollback, SSH-only Grafana observability, and independent teardown procedures, see [ops/poc/README.md](ops/poc/README.md). The POC Compose topology publishes no application host ports; observability exposes only Grafana, Loki, and Prometheus on Pi loopback and is separate from the local development stack.
+For the Raspberry Pi proof-of-concept stack, public Cloudflare Tunnel setup, pull-based CI/CD, backups, rollback, SSH-only Grafana observability, and independent teardown procedures, see [ops/poc/README.md](ops/poc/README.md). The POC Compose topology publishes no application host ports; observability exposes only Grafana, Loki, and Prometheus on Pi loopback and is separate from the local development stack.
 
 ### POC access boundary
 
-Cloudflare Access is the entry gate for the private POC and invited testers. It controls who can reach the deployment before traffic reaches the Pi, but it does not create Dialed accounts or replace application authentication, data ownership, synchronization, or account recovery. While Google OAuth is disabled, invited testers use Dialed anonymously and their data remains local to each browser and device.
-
-For a broader public release, retain Cloudflare Tunnel, TLS, and edge protection, remove the Access gate from the public application hostname, and use Dialed authentication for user identity and any application-level invitation flow. Cloudflare Access can remain on staging, administrative, and operational endpoints.
+The public-beta hostname uses Cloudflare Tunnel, TLS, and edge protection without a Cloudflare Access gate. Dialed authentication owns user identity, account-scoped data, synchronization, and account recovery. Visitors can use Dialed anonymously, with their data remaining local to each browser and device. Cloudflare Access can remain on separate staging, administrative, and operational hostnames.
 
 ## Delivery notes
 

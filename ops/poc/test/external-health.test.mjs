@@ -2,16 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   validateExternalHealthConfig,
-  verifyAccessProtection,
   waitForExternalRevision,
 } from "../lib/external-health.mjs";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const oldRevision = "1111111111111111111111111111111111111111";
-const credentials = {
-  clientId: "service-token-id",
-  clientSecret: "service-token-secret",
-};
 
 function healthResponse(pathname, deployedRevision = revision) {
   return Response.json({
@@ -20,17 +15,15 @@ function healthResponse(pathname, deployedRevision = revision) {
   });
 }
 
-test("external verification configuration requires HTTPS, a Git revision, and credentials", () => {
+test("public verification configuration requires HTTPS and a Git revision", () => {
   assert.deepEqual(
     validateExternalHealthConfig({
       baseUrl: "https://poc.example.com/",
       revision,
-      ...credentials,
     }),
     {
       baseUrl: "https://poc.example.com",
       revision,
-      ...credentials,
     },
   );
   assert.throws(
@@ -38,7 +31,6 @@ test("external verification configuration requires HTTPS, a Git revision, and cr
       validateExternalHealthConfig({
         baseUrl: "http://poc.example.com",
         revision,
-        ...credentials,
       }),
     /HTTPS/,
   );
@@ -47,60 +39,12 @@ test("external verification configuration requires HTTPS, a Git revision, and cr
       validateExternalHealthConfig({
         baseUrl: "https://poc.example.com",
         revision: "main",
-        ...credentials,
       }),
     /40-character/,
   );
-  assert.throws(
-    () =>
-      validateExternalHealthConfig({
-        baseUrl: "https://poc.example.com",
-        revision,
-        clientId: "",
-        clientSecret: "",
-      }),
-    /credentials/,
-  );
 });
 
-test("unauthenticated origin health is rejected as missing Access protection", async () => {
-  const requests = [];
-  await assert.rejects(
-    verifyAccessProtection({
-      baseUrl: "https://poc.example.com",
-      fetchImpl: async (input, init) => {
-        requests.push({ input: new URL(input), init });
-        return healthResponse("/healthz");
-      },
-    }),
-    /publicly reachable|Access protection/i,
-  );
-
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].input.pathname, "/healthz");
-  assert.equal(requests[0].init.redirect, "manual");
-  assert.equal(requests[0].init.headers, undefined);
-});
-
-test("unauthenticated Access denial or login redirect proves protection", async () => {
-  await verifyAccessProtection({
-    baseUrl: "https://poc.example.com",
-    fetchImpl: async () => new Response("forbidden", { status: 403 }),
-  });
-  await verifyAccessProtection({
-    baseUrl: "https://poc.example.com",
-    fetchImpl: async () =>
-      new Response(null, {
-        status: 302,
-        headers: {
-          location:
-            "https://dialed.cloudflareaccess.com/cdn-cgi/access/login/poc.example.com",
-        },
-      }),
-  });
-});
-
-test("both public health requests carry Cloudflare Access credentials", async () => {
+test("both public health requests are sent without authentication headers", async () => {
   const requests = [];
   const fetchImpl = async (input, init) => {
     const url = new URL(input);
@@ -111,7 +55,6 @@ test("both public health requests carry Cloudflare Access credentials", async ()
   await waitForExternalRevision({
     baseUrl: "https://poc.example.com",
     revision,
-    ...credentials,
     timeoutMs: 1_000,
     intervalMs: 0,
     fetchImpl,
@@ -123,11 +66,7 @@ test("both public health requests carry Cloudflare Access credentials", async ()
     ["/healthz", "/api/readyz"],
   );
   for (const { headers } of requests) {
-    assert.equal(headers.get("CF-Access-Client-Id"), credentials.clientId);
-    assert.equal(
-      headers.get("CF-Access-Client-Secret"),
-      credentials.clientSecret,
-    );
+    assert.deepEqual([...headers], []);
   }
 });
 
@@ -145,7 +84,6 @@ test("an old deployed revision is retried until both services converge", async (
   await waitForExternalRevision({
     baseUrl: "https://poc.example.com",
     revision,
-    ...credentials,
     timeoutMs: 1_000,
     intervalMs: 0,
     fetchImpl,
@@ -155,7 +93,7 @@ test("an old deployed revision is retried until both services converge", async (
   assert.equal(calls, 4);
 });
 
-test("a transient Cloudflare Access denial is retried", async () => {
+test("a transient edge denial is retried", async () => {
   let calls = 0;
   const fetchImpl = async (input) => {
     const attempt = Math.floor(calls / 2);
@@ -167,7 +105,6 @@ test("a transient Cloudflare Access denial is retried", async () => {
   await waitForExternalRevision({
     baseUrl: "https://poc.example.com",
     revision,
-    ...credentials,
     timeoutMs: 1_000,
     intervalMs: 0,
     fetchImpl,
@@ -190,7 +127,6 @@ test("mismatched web and API revisions are never accepted", async () => {
     waitForExternalRevision({
       baseUrl: "https://poc.example.com",
       revision,
-      ...credentials,
       timeoutMs: 0,
       intervalMs: 0,
       fetchImpl,
@@ -200,7 +136,7 @@ test("mismatched web and API revisions are never accepted", async () => {
   );
 });
 
-test("timeout errors include the last observed Access and origin states", async () => {
+test("timeout errors include the last observed public endpoint states", async () => {
   const fetchImpl = async (input) =>
     new URL(input).pathname === "/healthz"
       ? new Response("forbidden", { status: 403 })
@@ -213,7 +149,6 @@ test("timeout errors include the last observed Access and origin states", async 
     waitForExternalRevision({
       baseUrl: "https://poc.example.com",
       revision,
-      ...credentials,
       timeoutMs: 0,
       intervalMs: 0,
       fetchImpl,

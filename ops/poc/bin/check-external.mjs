@@ -2,7 +2,6 @@
 
 import {
   validateExternalHealthConfig,
-  verifyAccessProtection,
   waitForExternalRevision,
 } from "../lib/external-health.mjs";
 
@@ -10,10 +9,7 @@ try {
   const config = validateExternalHealthConfig({
     baseUrl: process.env.POC_BASE_URL,
     revision: process.env.APP_REVISION,
-    clientId: process.env.CF_ACCESS_CLIENT_ID,
-    clientSecret: process.env.CF_ACCESS_CLIENT_SECRET,
   });
-  await verifyAccessProtection({ baseUrl: config.baseUrl });
   await waitForExternalRevision({
     ...config,
     timeoutMs: 10 * 60 * 1_000,
