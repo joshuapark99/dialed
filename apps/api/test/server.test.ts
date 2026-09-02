@@ -6,8 +6,15 @@ import type {
   StoredSyncOperation,
   SyncStore,
 } from "@dialed/db";
-import { validateCoffeeBagDependencies } from "@dialed/db";
+import {
+  SyncOperationQuotaExceededError,
+  validateCoffeeBagDependencies,
+} from "@dialed/db";
 import type { AuthService } from "../src/auth.js";
+import {
+  defaultApiRateLimits,
+  type ApiRateLimitPolicy,
+} from "../src/rate-limit.js";
 import { createServer } from "../src/server.js";
 import { syncEntityFixtures } from "../../../test-fixtures/sync-entities.js";
 
@@ -94,6 +101,169 @@ function signedInAs(id: string): AuthService {
     },
   };
 }
+
+function oneRequestPolicy(key: keyof ApiRateLimitPolicy): ApiRateLimitPolicy {
+  return {
+    ...defaultApiRateLimits,
+    [key]: {
+      ...defaultApiRateLimits[key],
+      max: 1,
+      timeWindow: 60_000,
+    },
+  };
+}
+
+const limitedRouteCases = [
+  {
+    name: "account lookup",
+    key: "me",
+    request: { method: "GET", url: "/v1/me" },
+    firstStatus: 200,
+  },
+  {
+    name: "sync push",
+    key: "syncPush",
+    request: {
+      method: "POST",
+      url: "/v1/sync/push",
+      headers: { "x-dialed-account-id": "user-1" },
+      payload: {
+        operations: [
+          {
+            operationId: "0198d4a4-3ad8-7fa1-b653-9a51a55d5001",
+            entity: "bean",
+            entityId: syncEntityFixtures.bean.id,
+            action: "upsert",
+            payload: syncEntityFixtures.bean,
+          },
+        ],
+      },
+    },
+    firstStatus: 200,
+  },
+  {
+    name: "sync pull",
+    key: "syncPull",
+    request: {
+      method: "GET",
+      url: "/v1/sync/pull?cursor=0",
+      headers: { "x-dialed-account-id": "user-1" },
+    },
+    firstStatus: 200,
+  },
+  {
+    name: "account export",
+    key: "accountExport",
+    request: { method: "GET", url: "/v1/account/export?format=json" },
+    firstStatus: 200,
+  },
+  {
+    name: "account deletion",
+    key: "accountDelete",
+    request: {
+      method: "DELETE",
+      url: "/v1/account",
+      headers: { "x-dialed-account-id": "user-1" },
+      payload: { confirmation: "DELETE" },
+    },
+    firstStatus: 204,
+  },
+] as const;
+
+for (const scenario of limitedRouteCases) {
+  test(`rate limits ${scenario.name} by verified account`, async () => {
+    const app = createServer({
+      auth: signedIn,
+      store: new MemoryStore(),
+      rateLimits: oneRequestPolicy(scenario.key),
+    });
+    const first = await app.inject(scenario.request);
+    const limited = await app.inject(scenario.request);
+
+    assert.equal(first.statusCode, scenario.firstStatus);
+    assert.equal(limited.statusCode, 429);
+    assert.equal(limited.json().error.code, "rate_limit_exceeded");
+    assert.ok(limited.json().error.retryAfterSeconds > 0);
+    assert.ok(Number(limited.headers["retry-after"]) > 0);
+    await app.close();
+  });
+}
+
+test("rejects unauthenticated requests before account rate limiting", async () => {
+  const app = createServer({
+    auth: signedOut,
+    store: new MemoryStore(),
+    rateLimits: oneRequestPolicy("me"),
+  });
+  const first = await app.inject({ method: "GET", url: "/v1/me" });
+  const second = await app.inject({ method: "GET", url: "/v1/me" });
+  assert.deepEqual([first.statusCode, second.statusCode], [401, 401]);
+  await app.close();
+});
+
+for (const variant of [
+  { name: "changed", headers: { "x-dialed-account-id": "user-2" } },
+  { name: "omitted", headers: {} },
+]) {
+  test(`does not let a ${variant.name} account header select another bucket`, async () => {
+    const app = createServer({
+      auth: signedIn,
+      store: new MemoryStore(),
+      rateLimits: oneRequestPolicy("syncPush"),
+    });
+    const payload = limitedRouteCases[1].request.payload;
+    assert.equal(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/v1/sync/push",
+          headers: { "x-dialed-account-id": "user-1" },
+          payload,
+        })
+      ).statusCode,
+      200,
+    );
+    assert.equal(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/v1/sync/push",
+          headers: variant.headers,
+          payload,
+        })
+      ).statusCode,
+      429,
+    );
+    await app.close();
+  });
+}
+
+class QuotaStore extends MemoryStore {
+  override async push(): Promise<PushResult[]> {
+    throw new SyncOperationQuotaExceededError(50_000, 50_000, 1);
+  }
+}
+
+test("maps sync quota exhaustion to a stable 413 response", async () => {
+  const app = createServer({ auth: signedIn, store: new QuotaStore() });
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/sync/push",
+    headers: { "x-dialed-account-id": "user-1" },
+    payload: limitedRouteCases[1].request.payload,
+  });
+  assert.equal(response.statusCode, 413);
+  assert.deepEqual(response.json(), {
+    error: {
+      code: "sync_quota_exceeded",
+      message: "Cloud sync storage limit reached",
+      limit: 50_000,
+      current: 50_000,
+      attemptedNew: 1,
+    },
+  });
+  await app.close();
+});
 
 const coffeePayload = {
   id: "0198d4a4-3ad8-7fa1-b653-9a51a55d4f90",

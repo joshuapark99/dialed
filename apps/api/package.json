@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@dialed/db": "workspace:*",
+    "@fastify/rate-limit": "^11.2.0",
     "@fastify/swagger": "^9.5.1",
     "@fastify/swagger-ui": "^6.1.1",
     "better-auth": "^1.7.2",

@@ -5,11 +5,13 @@ import Fastify, {
   type FastifyRequest,
   type FastifyServerOptions,
 } from "fastify";
+import rateLimit from "@fastify/rate-limit";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import { fromNodeHeaders } from "better-auth/node";
 import {
   InvalidSyncDependencyError,
+  SyncOperationQuotaExceededError,
   type SyncStore,
   type StoredSyncOperation,
 } from "@dialed/db";
@@ -20,12 +22,20 @@ import {
   pullQuerySchema,
   pushBodySchema,
 } from "./contracts.js";
+import { defaultApiRateLimits, type ApiRateLimitPolicy } from "./rate-limit.js";
+
+declare module "fastify" {
+  interface FastifyRequest {
+    dialedPrincipal: Principal | null;
+  }
+}
 
 export interface ServerDependencies {
   auth: AuthService;
   store: SyncStore;
   revision?: string;
   logger?: FastifyServerOptions["logger"];
+  rateLimits?: ApiRateLimitPolicy;
 }
 
 function csvCell(value: unknown): string {
@@ -51,21 +61,6 @@ function operationsToCsv(operations: StoredSyncOperation[]): string {
       .join(","),
   );
   return [header, ...rows].join("\n");
-}
-
-async function requirePrincipal(
-  request: FastifyRequest,
-  reply: FastifyReply,
-  auth: AuthService,
-): Promise<Principal | null> {
-  const principal = await auth.authenticate(request);
-  if (!principal) {
-    await reply
-      .code(401)
-      .send({ error: { code: "unauthorized", message: "Sign in required" } });
-    return null;
-  }
-  return principal;
 }
 
 async function requireExpectedAccount(
@@ -100,6 +95,45 @@ export function createServer(
     }),
   });
   const revision = dependencies.revision ?? "development";
+  const rateLimits = dependencies.rateLimits ?? defaultApiRateLimits;
+
+  app.decorateRequest("dialedPrincipal", null);
+  void app.register(rateLimit, {
+    global: false,
+    hook: "preHandler",
+    keyGenerator(request) {
+      if (!request.dialedPrincipal) {
+        throw new Error(
+          "Rate-limited route is missing an authenticated principal",
+        );
+      }
+      return request.dialedPrincipal.id;
+    },
+    errorResponseBuilder(_request, context) {
+      return {
+        statusCode: 429,
+        error: {
+          code: "rate_limit_exceeded",
+          message: "Too many requests; try again shortly",
+          retryAfterSeconds: Math.max(1, Math.ceil(context.ttl / 1000)),
+        },
+      };
+    },
+  });
+
+  async function authenticateV1(
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<void> {
+    const principal = await dependencies.auth.authenticate(request);
+    if (!principal) {
+      await reply
+        .code(401)
+        .send({ error: { code: "unauthorized", message: "Sign in required" } });
+      return;
+    }
+    request.dialedPrincipal = principal;
+  }
 
   void app.register(swagger, {
     openapi: {
@@ -127,6 +161,9 @@ export function createServer(
       { err: error, route: request.routeOptions.url },
       "request failed",
     );
+    if ((error as { statusCode?: number }).statusCode === 429) {
+      return reply.code(429).send(error);
+    }
     void reply.code(500).send({
       error: {
         code: "internal_error",
@@ -175,120 +212,160 @@ export function createServer(
     });
   }
 
-  app.get("/v1/me", async (request, reply) => {
-    const principal = await requirePrincipal(request, reply, dependencies.auth);
-    if (!principal) return;
-    return { user: principal };
-  });
-
-  app.post("/v1/sync/push", async (request, reply) => {
-    const principal = await requirePrincipal(request, reply, dependencies.auth);
-    if (!principal) return;
-    if (!(await requireExpectedAccount(request, reply, principal))) return;
-    const parsed = pushBodySchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({
-        error: {
-          code: "invalid_request",
-          message: "Invalid sync operations",
-          issues: parsed.error.issues,
-        },
-      });
-    }
-    let results;
-    try {
-      results = await dependencies.store.push(
-        principal.id,
-        parsed.data.operations,
-      );
-    } catch (error) {
-      if (error instanceof InvalidSyncDependencyError) {
-        return reply.code(400).send({
-          error: {
-            code: "invalid_dependency",
-            message: error.message,
-            entityId: error.entityId,
-            coffeeId: error.coffeeId,
-          },
-        });
-      }
-      throw error;
-    }
-    return { results };
-  });
-
-  app.get("/v1/sync/pull", async (request, reply) => {
-    const principal = await requirePrincipal(request, reply, dependencies.auth);
-    if (!principal) return;
-    if (!(await requireExpectedAccount(request, reply, principal))) return;
-    const parsed = pullQuerySchema.safeParse(request.query);
-    if (!parsed.success) {
-      return reply.code(400).send({
-        error: {
-          code: "invalid_request",
-          message: "Invalid sync cursor",
-          issues: parsed.error.issues,
-        },
-      });
-    }
-    const operations = await dependencies.store.pull(
-      principal.id,
-      parsed.data.cursor,
-      parsed.data.limit,
+  app.after(() => {
+    app.get(
+      "/v1/me",
+      {
+        preValidation: authenticateV1,
+        config: { rateLimit: rateLimits.me },
+      },
+      async (request) => ({ user: request.dialedPrincipal! }),
     );
-    return {
-      operations,
-      cursor: operations.at(-1)?.revision ?? parsed.data.cursor,
-      hasMore: operations.length === parsed.data.limit,
-    };
-  });
 
-  app.get("/v1/account/export", async (request, reply) => {
-    const principal = await requirePrincipal(request, reply, dependencies.auth);
-    if (!principal) return;
-    const parsed = exportQuerySchema.safeParse(request.query);
-    if (!parsed.success) {
-      return reply.code(400).send({
-        error: { code: "invalid_request", message: "Invalid format" },
-      });
-    }
-    const operations = await dependencies.store.exportUser(principal.id);
-    if (parsed.data.format === "csv") {
-      return reply
-        .type("text/csv; charset=utf-8")
-        .header(
-          "content-disposition",
-          'attachment; filename="dialed-export.csv"',
-        )
-        .send(operationsToCsv(operations));
-    }
-    return reply
-      .header(
-        "content-disposition",
-        'attachment; filename="dialed-export.json"',
-      )
-      .send({
-        exportedAt: new Date().toISOString(),
-        user: principal,
-        operations,
-      });
-  });
+    app.post(
+      "/v1/sync/push",
+      {
+        preValidation: authenticateV1,
+        config: { rateLimit: rateLimits.syncPush },
+      },
+      async (request, reply) => {
+        const principal = request.dialedPrincipal!;
+        if (!(await requireExpectedAccount(request, reply, principal))) return;
+        const parsed = pushBodySchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({
+            error: {
+              code: "invalid_request",
+              message: "Invalid sync operations",
+              issues: parsed.error.issues,
+            },
+          });
+        }
+        let results;
+        try {
+          results = await dependencies.store.push(
+            principal.id,
+            parsed.data.operations,
+          );
+        } catch (error) {
+          if (error instanceof SyncOperationQuotaExceededError) {
+            return reply.code(413).send({
+              error: {
+                code: "sync_quota_exceeded",
+                message: "Cloud sync storage limit reached",
+                limit: error.limit,
+                current: error.current,
+                attemptedNew: error.attemptedNew,
+              },
+            });
+          }
+          if (error instanceof InvalidSyncDependencyError) {
+            return reply.code(400).send({
+              error: {
+                code: "invalid_dependency",
+                message: error.message,
+                entityId: error.entityId,
+                coffeeId: error.coffeeId,
+              },
+            });
+          }
+          throw error;
+        }
+        return { results };
+      },
+    );
 
-  app.delete("/v1/account", async (request, reply) => {
-    const principal = await requirePrincipal(request, reply, dependencies.auth);
-    if (!principal) return;
-    if (!(await requireExpectedAccount(request, reply, principal))) return;
-    const parsed = deleteAccountBodySchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({
-        error: {
-          code: "confirmation_required",
-          message: 'Send {"confirmation":"DELETE"}',
-        },
-      });
-    }
-    await dependencies.store.deleteUser(principal.id);
-    return reply.code(204).send();
+    app.get(
+      "/v1/sync/pull",
+      {
+        preValidation: authenticateV1,
+        config: { rateLimit: rateLimits.syncPull },
+      },
+      async (request, reply) => {
+        const principal = request.dialedPrincipal!;
+        if (!(await requireExpectedAccount(request, reply, principal))) return;
+        const parsed = pullQuerySchema.safeParse(request.query);
+        if (!parsed.success) {
+          return reply.code(400).send({
+            error: {
+              code: "invalid_request",
+              message: "Invalid sync cursor",
+              issues: parsed.error.issues,
+            },
+          });
+        }
+        const operations = await dependencies.store.pull(
+          principal.id,
+          parsed.data.cursor,
+          parsed.data.limit,
+        );
+        return {
+          operations,
+          cursor: operations.at(-1)?.revision ?? parsed.data.cursor,
+          hasMore: operations.length === parsed.data.limit,
+        };
+      },
+    );
+
+    app.get(
+      "/v1/account/export",
+      {
+        preValidation: authenticateV1,
+        config: { rateLimit: rateLimits.accountExport },
+      },
+      async (request, reply) => {
+        const principal = request.dialedPrincipal!;
+        const parsed = exportQuerySchema.safeParse(request.query);
+        if (!parsed.success) {
+          return reply.code(400).send({
+            error: { code: "invalid_request", message: "Invalid format" },
+          });
+        }
+        const operations = await dependencies.store.exportUser(principal.id);
+        if (parsed.data.format === "csv") {
+          return reply
+            .type("text/csv; charset=utf-8")
+            .header(
+              "content-disposition",
+              'attachment; filename="dialed-export.csv"',
+            )
+            .send(operationsToCsv(operations));
+        }
+        return reply
+          .header(
+            "content-disposition",
+            'attachment; filename="dialed-export.json"',
+          )
+          .send({
+            exportedAt: new Date().toISOString(),
+            user: principal,
+            operations,
+          });
+      },
+    );
+
+    app.delete(
+      "/v1/account",
+      {
+        preValidation: authenticateV1,
+        config: { rateLimit: rateLimits.accountDelete },
+      },
+      async (request, reply) => {
+        const principal = request.dialedPrincipal!;
+        if (!(await requireExpectedAccount(request, reply, principal))) return;
+        const parsed = deleteAccountBodySchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({
+            error: {
+              code: "confirmation_required",
+              message: 'Send {"confirmation":"DELETE"}',
+            },
+          });
+        }
+        await dependencies.store.deleteUser(principal.id);
+        return reply.code(204).send();
+      },
+    );
   });
 
   return app;
