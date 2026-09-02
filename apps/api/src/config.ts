@@ -6,6 +6,7 @@ const configSchema = z.object({
     .default("development"),
   API_HOST: z.string().default("0.0.0.0"),
   API_PORT: z.coerce.number().int().min(1).max(65_535).default(3001),
+  SYNC_OPERATION_QUOTA: z.coerce.number().int().positive().default(50_000),
   APP_REVISION: z.string().min(1).default("development"),
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
   BETTER_AUTH_SECRET: z

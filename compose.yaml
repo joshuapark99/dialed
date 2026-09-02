@@ -28,6 +28,7 @@ services:
     environment:
       APP_URL: http://localhost:3000
       API_PORT: 3001
+      SYNC_OPERATION_QUOTA: ${SYNC_OPERATION_QUOTA:-50000}
       DATABASE_URL: postgresql://dialed:dialed@postgres:5432/dialed
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-local-development-secret-change-me}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-local-google-disabled}

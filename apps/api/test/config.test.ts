@@ -16,6 +16,22 @@ test("configuration provides local API defaults", () => {
   assert.equal(config.API_HOST, "0.0.0.0");
   assert.equal(config.API_PORT, 3001);
   assert.equal(config.APP_REVISION, "development");
+  assert.equal(config.SYNC_OPERATION_QUOTA, 50_000);
+});
+
+test("configuration accepts a positive sync operation quota", () => {
+  assert.equal(
+    readConfig({ ...validEnvironment, SYNC_OPERATION_QUOTA: "250" })
+      .SYNC_OPERATION_QUOTA,
+    250,
+  );
+});
+
+test("configuration rejects a non-positive sync operation quota", () => {
+  assert.throws(
+    () => readConfig({ ...validEnvironment, SYNC_OPERATION_QUOTA: "0" }),
+    /SYNC_OPERATION_QUOTA/,
+  );
 });
 
 test("configuration accepts the deployed revision", () => {

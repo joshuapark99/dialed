@@ -39,7 +39,7 @@ sudo install -o root -g root -m 0600 /etc/dialed/poc.env.example /etc/dialed/poc
 sudoedit /etc/dialed/poc.env
 ```
 
-Fill every value. `APP_URL` is the exact public HTTPS origin without a trailing slash. Generate URL-safe secrets, for example with `openssl rand -base64 48 | tr -d '\n'`; `BETTER_AUTH_SECRET` must contain at least 32 random bytes. Keep `POSTGRES_PASSWORD` URL-safe because it is interpolated into `DATABASE_URL`.
+Fill every value. `APP_URL` is the exact public HTTPS origin without a trailing slash. Generate URL-safe secrets, for example with `openssl rand -base64 48 | tr -d '\n'`; `BETTER_AUTH_SECRET` must contain at least 32 random bytes. Keep `POSTGRES_PASSWORD` URL-safe because it is interpolated into `DATABASE_URL`. `SYNC_OPERATION_QUOTA` defaults to `50000` unique ledger operations per account. Keep that value for the friend beta; increasing it requires reviewing Raspberry Pi database capacity.
 
 Example path choices:
 

@@ -31,6 +31,7 @@ test(
     assert.equal(rendered.status, 0, rendered.stderr || rendered.stdout);
 
     const model = JSON.parse(rendered.stdout);
+    assert.equal(model.services.api.environment.SYNC_OPERATION_QUOTA, "50000");
     for (const service of Object.values(model.services)) {
       assert.deepEqual(service.ports ?? [], []);
       assert.equal(

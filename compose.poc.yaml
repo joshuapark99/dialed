@@ -65,6 +65,7 @@ services:
       NODE_ENV: production
       API_HOST: 0.0.0.0
       API_PORT: "3001"
+      SYNC_OPERATION_QUOTA: ${SYNC_OPERATION_QUOTA:-50000}
       APP_REVISION: ${APP_REVISION:?APP_REVISION is required}
       APP_URL: ${APP_URL:?APP_URL is required}
       DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
