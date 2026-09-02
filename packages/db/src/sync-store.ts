@@ -21,6 +21,21 @@ export interface PushResult {
   duplicate: boolean;
 }
 
+export interface SyncStoreOptions {
+  maxOperations?: number;
+}
+
+export class SyncOperationQuotaExceededError extends Error {
+  constructor(
+    public readonly limit: number,
+    public readonly current: number,
+    public readonly attemptedNew: number,
+  ) {
+    super(`Sync operation quota of ${limit} exceeded`);
+    this.name = "SyncOperationQuotaExceededError";
+  }
+}
+
 export class InvalidSyncDependencyError extends Error {
   constructor(
     public readonly entityId: string,
@@ -138,7 +153,17 @@ export interface SyncStore {
 }
 
 export class PostgresSyncStore implements SyncStore {
-  constructor(private readonly db: DialedDatabase) {}
+  private readonly maxOperations: number;
+
+  constructor(
+    private readonly db: DialedDatabase,
+    options: SyncStoreOptions = {},
+  ) {
+    this.maxOperations = options.maxOperations ?? 50_000;
+    if (!Number.isInteger(this.maxOperations) || this.maxOperations < 1) {
+      throw new Error("maxOperations must be a positive integer");
+    }
+  }
 
   async health(): Promise<void> {
     await this.db.execute(sql`select 1`);
@@ -156,6 +181,21 @@ export class PostgresSyncStore implements SyncStore {
         .from(syncOperations)
         .where(eq(syncOperations.userId, userId))
         .orderBy(asc(syncOperations.revision));
+      const existingOperationIds = new Set(
+        existingLedger.map((operation) => operation.operationId),
+      );
+      const newOperationIds = new Set(
+        operations
+          .map((operation) => operation.operationId)
+          .filter((operationId) => !existingOperationIds.has(operationId)),
+      );
+      if (existingLedger.length + newOperationIds.size > this.maxOperations) {
+        throw new SyncOperationQuotaExceededError(
+          this.maxOperations,
+          existingLedger.length,
+          newOperationIds.size,
+        );
+      }
       validateCoffeeBagDependencies(existingLedger, operations);
       let nextRevision = (existingLedger.at(-1)?.revision ?? 0) + 1;
       const results: PushResult[] = [];
