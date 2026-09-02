@@ -52,13 +52,13 @@ The rate-limit plugin will run at `preHandler`, after authentication. Its key ge
 
 The initial per-account, per-route policies are:
 
-| Route | Limit | Window |
-| --- | ---: | --- |
-| `GET /v1/me` | 120 | 1 minute |
-| `POST /v1/sync/push` | 30 | 1 minute |
-| `GET /v1/sync/pull` | 120 | 1 minute |
-| `GET /v1/account/export` | 5 | 1 hour |
-| `DELETE /v1/account` | 5 | 1 hour |
+| Route                    | Limit | Window   |
+| ------------------------ | ----: | -------- |
+| `GET /v1/me`             |   120 | 1 minute |
+| `POST /v1/sync/push`     |    30 | 1 minute |
+| `GET /v1/sync/pull`      |   120 | 1 minute |
+| `GET /v1/account/export` |     5 | 1 hour   |
+| `DELETE /v1/account`     |     5 | 1 hour   |
 
 Health, readiness, documentation, and Better Auth routes will not use this authenticated-account limiter. Each row in the table has an independent bucket. Rate-limit defaults will live in one typed server policy object. `ServerDependencies` will accept an override so tests can use small deterministic limits without adding five production environment variables.
 
