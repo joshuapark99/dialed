@@ -162,7 +162,11 @@ export function createServer(
       "request failed",
     );
     if ((error as { statusCode?: number }).statusCode === 429) {
-      return reply.code(429).send(error);
+      const { statusCode: _statusCode, ...body } = error as {
+        statusCode: number;
+        error: unknown;
+      };
+      return reply.code(429).send(body);
     }
     void reply.code(500).send({
       error: {

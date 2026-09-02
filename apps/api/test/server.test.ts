@@ -182,9 +182,16 @@ for (const scenario of limitedRouteCases) {
 
     assert.equal(first.statusCode, scenario.firstStatus);
     assert.equal(limited.statusCode, 429);
-    assert.equal(limited.json().error.code, "rate_limit_exceeded");
-    assert.ok(limited.json().error.retryAfterSeconds > 0);
-    assert.ok(Number(limited.headers["retry-after"]) > 0);
+    const retryAfterSeconds = Number(limited.headers["retry-after"]);
+    assert.ok(Number.isInteger(retryAfterSeconds));
+    assert.ok(retryAfterSeconds > 0);
+    assert.deepEqual(limited.json(), {
+      error: {
+        code: "rate_limit_exceeded",
+        message: "Too many requests; try again shortly",
+        retryAfterSeconds,
+      },
+    });
     await app.close();
   });
 }

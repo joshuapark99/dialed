@@ -77,6 +77,38 @@ test("counts unique new IDs and keeps duplicate retries available at the quota",
   });
 });
 
+test("rejects a partially full batch atomically when its new operations exceed the quota", async () => {
+  await withUser(async (userId) => {
+    const store = new PostgresSyncStore(database.db, { maxOperations: 2 });
+    const original = operation();
+    const firstOverflow = operation();
+    const secondOverflow = operation();
+
+    await store.push(userId, [original]);
+
+    await assert.rejects(
+      store.push(userId, [firstOverflow, secondOverflow]),
+      (error: unknown) => {
+        assert.ok(error instanceof SyncOperationQuotaExceededError);
+        assert.deepEqual(
+          {
+            limit: error.limit,
+            current: error.current,
+            attemptedNew: error.attemptedNew,
+          },
+          { limit: 2, current: 1, attemptedNew: 2 },
+        );
+        return true;
+      },
+    );
+
+    assert.deepEqual(
+      (await store.exportUser(userId)).map(({ operationId }) => operationId),
+      [original.operationId],
+    );
+  });
+});
+
 test("serializes concurrent pushes competing for the final quota slot", async () => {
   await withUser(async (userId) => {
     const store = new PostgresSyncStore(database.db, { maxOperations: 1 });
