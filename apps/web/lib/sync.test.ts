@@ -3612,6 +3612,54 @@ describe("owner-aware synchronization", () => {
     expect(acknowledgeOperations).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      status: 429,
+      body: {
+        error: {
+          code: "rate_limit_exceeded",
+          message: "Too many requests; try again shortly",
+          retryAfterSeconds: 30,
+        },
+      },
+    },
+    {
+      status: 413,
+      body: {
+        error: {
+          code: "sync_quota_exceeded",
+          message: "Cloud sync storage limit reached",
+          limit: 50_000,
+          current: 50_000,
+          attemptedNew: 1,
+        },
+      },
+    },
+  ])(
+    "preserves pending operations after a $status push rejection",
+    async ({ status, body }) => {
+      const pending = [queuedOperation()];
+      const acknowledgeOperations = vi.fn(async () => undefined);
+      const getOperations = vi.fn(async (_ownerId: string) => pending);
+      const sync = createSynchronizer(
+        dependencies({
+          fetch: vi.fn(async (input: string | URL | Request) => {
+            if (String(input) === "/api/v1/me") {
+              return response(200, { user: aliceAccount });
+            }
+            return response(status, body);
+          }),
+          getOperations,
+          acknowledgeOperations,
+        }),
+      );
+
+      await expect(sync(alice)).rejects.toThrow("Sync push failed");
+      expect(acknowledgeOperations).not.toHaveBeenCalled();
+      expect(await getOperations(alice)).toEqual(pending);
+    },
+  );
+
   it("retains pending operations when a push fails and allows a retry", async () => {
     const pending = [queuedOperation()];
     let pushAttempts = 0;
